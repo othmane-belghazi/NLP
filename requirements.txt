@@ -1,0 +1,16 @@
+
+---
+
+### **📌 Contenu du fichier `requirements.txt`**
+Ce fichier liste toutes les bibliothèques Python nécessaires.
+
+```txt
+langchain
+langchain-community
+langchain-huggingface
+langchain-chroma
+langchain-google-genai
+google-generativeai
+chromadb
+sentence-transformers
+pypdf

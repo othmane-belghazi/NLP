@@ -1,0 +1,6 @@
+db_path: "db"
+data_directory: "data/"
+embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+llm_model: "llama3-8b-8192"
+top_k: 3
+temperature: 0.1
