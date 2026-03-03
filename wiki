@@ -1,0 +1,999 @@
+"""
+=============================================================================
+RÉSILIATION AUTOMOBILE 2022–2025 — STYLE McKINSEY / CONSULTING
+=============================================================================
+Esthétique : fond blanc pur, typographie serif noire, palette institutionnelle
+             sobre (navy, bleu McKinsey, gris charbon), titres analytiques
+             avec ligne de "headline insight", mise en page dense et rigoureuse.
+=============================================================================
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import matplotlib.patches as mpatches
+import matplotlib.lines as mlines
+from matplotlib.gridspec import GridSpec
+from matplotlib.colors import LinearSegmentedColormap
+import seaborn as sns
+import warnings
+warnings.filterwarnings("ignore")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. PALETTE McKINSEY — ÉPURÉE, INSTITUTIONNELLE
+# ─────────────────────────────────────────────────────────────────────────────
+MK_NAVY    = "#003566"   # bleu marine profond (barre principale, accent)
+MK_BLUE    = "#0077B6"   # bleu McKinsey mid (données secondaires)
+MK_LBLUE   = "#90E0EF"   # bleu clair (remplissage, fond de bar)
+MK_GREY    = "#4A4A4A"   # gris charbon (texte corps, axes)
+MK_LGREY   = "#E8E8E8"   # gris clair (grille, bandes de fond)
+MK_RED     = "#C1121F"   # rouge alerte (hausse, anomalie)
+MK_GREEN   = "#2D6A4F"   # vert signal (baisse, bonne nouvelle)
+MK_ORANGE  = "#E07B39"   # orange (accent tertiaire)
+WHITE      = "#FFFFFF"
+BLACK      = "#111111"
+
+# Séquence catégorielle McKinsey (max 6 modalités)
+MK_CAT     = [MK_NAVY, MK_BLUE, "#48CAE4", "#ADE8F4", MK_ORANGE, MK_LGREY]
+
+# Colormap heatmap : blanc → bleu navy
+CMAP_MK    = LinearSegmentedColormap.from_list("mk", [WHITE, MK_LBLUE, MK_NAVY], N=256)
+CMAP_DIV   = LinearSegmentedColormap.from_list("mk_div", [MK_RED, WHITE, MK_NAVY], N=256)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. STYLE GLOBAL — RÈGLES McKINSEY
+# ─────────────────────────────────────────────────────────────────────────────
+def set_mckinsey_style():
+    plt.rcParams.update({
+        # Fond blanc pur
+        "figure.facecolor"     : WHITE,
+        "axes.facecolor"       : WHITE,
+        # Typographie : Georgia serif (proche Bower ou sans-serif haut de gamme)
+        "font.family"          : "Georgia",
+        "font.size"            : 10,
+        "text.color"           : BLACK,
+        # Axes : bords fins, couleur charbon
+        "axes.edgecolor"       : MK_GREY,
+        "axes.linewidth"       : 0.7,
+        "axes.labelcolor"      : MK_GREY,
+        "axes.labelsize"       : 9,
+        "axes.titlesize"       : 11,
+        "axes.titlecolor"      : BLACK,
+        "axes.titleweight"     : "bold",
+        "axes.titlepad"        : 10,
+        # Grille : légère, discrète, horizontale uniquement
+        "axes.grid"            : True,
+        "axes.grid.axis"       : "y",
+        "grid.color"           : MK_LGREY,
+        "grid.linestyle"       : "-",
+        "grid.linewidth"       : 0.5,
+        "grid.alpha"           : 0.8,
+        # Ticks minimalistes
+        "xtick.color"          : MK_GREY,
+        "ytick.color"          : MK_GREY,
+        "xtick.labelsize"      : 8,
+        "ytick.labelsize"      : 8,
+        "xtick.bottom"         : True,
+        "ytick.left"           : False,  # pas de ticks y, grille suffit
+        "xtick.major.size"     : 3,
+        "ytick.major.size"     : 0,
+        # Légende sobre
+        "legend.fontsize"      : 8,
+        "legend.frameon"       : False,
+        "legend.labelcolor"    : MK_GREY,
+        # Sauvegarde haute résolution
+        "savefig.dpi"          : 180,
+        "savefig.bbox"         : "tight",
+        "savefig.facecolor"    : WHITE,
+    })
+
+set_mckinsey_style()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. FONCTIONS DE MISE EN PAGE McKINSEY
+# ─────────────────────────────────────────────────────────────────────────────
+def mk_header(fig, title: str, insight: str, source: str = "Source : Portefeuille Auto 2022–2025"):
+    """
+    En-tête McKinsey : trait horizontal noir, TITRE EN MAJUSCULES,
+    insight analytique en italique charbon, source en bas de figure.
+    """
+    # Trait supérieur bleu marine
+    fig.add_artist(mlines.Line2D([0.0, 1.0], [1.005, 1.005],
+                                  transform=fig.transFigure,
+                                  color=MK_NAVY, linewidth=4, solid_capstyle="butt"))
+    # Titre principal
+    fig.text(0.0, 1.025, title.upper(), transform=fig.transFigure,
+             fontsize=14, fontweight="bold", color=BLACK,
+             fontfamily="Georgia", va="bottom")
+    # Insight (headline analytique)
+    fig.text(0.0, 1.005, insight, transform=fig.transFigure,
+             fontsize=9, color=MK_GREY, style="italic", va="top")
+    # Source en bas à gauche
+    fig.text(0.0, -0.02, source, transform=fig.transFigure,
+             fontsize=7, color=MK_LGREY, va="top")
+
+def spine_clean(ax, keep_bottom=True):
+    """Supprime les bords superflu (McKinsey : seulement axe x bas)."""
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.spines["bottom"].set_visible(keep_bottom)
+    if keep_bottom:
+        ax.spines["bottom"].set_color(MK_GREY)
+        ax.spines["bottom"].set_linewidth(0.7)
+
+def data_label(ax, val: float, x, y: float, fmt="{:.1f}%",
+               color=BLACK, offset=3, fontsize=8):
+    """Étiquette de données directement sur le graphique (pas de légende axe)."""
+    ax.annotate(fmt.format(val), xy=(x, y),
+                xytext=(0, offset), textcoords="offset points",
+                ha="center", va="bottom", fontsize=fontsize,
+                color=color, fontweight="bold", fontfamily="Georgia")
+
+def section_label(ax, text: str):
+    """Mini-titre de section en haut à gauche de l'axe."""
+    ax.set_title(text, loc="left", fontsize=10, fontweight="bold",
+                 color=BLACK, pad=8, fontfamily="Georgia")
+
+COULEURS_ANNEES = {2022: MK_LGREY, 2023: MK_LBLUE, 2024: MK_BLUE, 2025: MK_NAVY}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. GÉNÉRATION DES BASES SYNTHÉTIQUES
+# ─────────────────────────────────────────────────────────────────────────────
+def generate_base(annee, n, seed):
+    rng = np.random.default_rng(seed)
+    taux_base = {2022:0.10, 2023:0.12, 2024:0.14, 2025:0.15}[annee]
+
+    produits   = ["Tiers Simple","Tiers Étendu","Tous Risques"]
+    canaux     = ["Courtier","Direct","Comparateur","Agent"]
+    segments   = ["Silver","Standard","Premium","Jeune Conducteur"]
+    regions    = ["Île-de-France","PACA","Auvergne-Rhône-Alpes",
+                  "Occitanie","Grand Est","Hauts-de-France","Bretagne"]
+    energies   = ["Essence","Diesel","Électrique","Hybride"]
+    fractions  = ["Annuel","Semestriel","Mensuel"]
+    motifs     = ["Échéance principale","Loi Hamon","Résil. sinistre",
+                  "Vente véhicule","Déménagement","Concurrence tarifaire"]
+
+    age              = rng.integers(18,80,n)
+    anciennete_cont  = rng.integers(0,25,n)
+    anciennete_cli   = rng.integers(0,30,n)
+    bonus_malus      = rng.uniform(0.5,1.5,n).round(2)
+    prime_ttc_n1     = rng.uniform(300,2000,n).round(2)
+    delta_mult       = {2022:0.02,2023:0.03,2024:0.07,2025:0.06}[annee]
+    delta            = rng.normal(delta_mult,0.08,n)
+    prime_ttc        = (prime_ttc_n1*(1+delta)).round(2)
+    nb_sin           = rng.choice([0,0,0,1,1,2,3],n)
+    nb_contrats      = rng.integers(1,5,n)
+    indice_client    = rng.uniform(0,1,n).round(3)
+
+    produit_arr  = rng.choice(produits,  n, p=[0.30,0.35,0.35])
+    canal_arr    = rng.choice(canaux,    n, p=[0.40,0.25,0.25,0.10])
+    segment_arr  = rng.choice(segments,  n, p=[0.25,0.40,0.25,0.10])
+    region_arr   = rng.choice(regions,   n)
+    energie_arr  = rng.choice(energies,  n, p=[0.40,0.35,0.10,0.15])
+    fraction_arr = rng.choice(fractions, n, p=[0.45,0.30,0.25])
+
+    logit = (taux_base
+        + 0.04*(canal_arr=="Comparateur")
+        + 0.03*(age<25).astype(float)
+        + 0.03*(delta>0.10)
+        + 0.02*(prime_ttc>1200)
+        + 0.02*(nb_sin>=2)
+        + 0.02*(segment_arr=="Jeune Conducteur")
+        - 0.02*(anciennete_cont>10)
+        - 0.02*(canal_arr=="Agent")
+        + rng.normal(0,0.02,n))
+    proba = np.clip(logit,0.01,0.95)
+    resilie = (rng.uniform(0,1,n)<proba).astype(int)
+
+    date_terme_arr = pd.to_datetime(
+        [f"{annee}-{rng.integers(1,13):02d}-01" for _ in range(n)])
+    date_resil_arr = []
+    for i in range(n):
+        if resilie[i]:
+            m = rng.integers(1,13); d = rng.integers(1,29)
+            date_resil_arr.append(pd.Timestamp(f"{annee}-{m:02d}-{d:02d}"))
+        else:
+            date_resil_arr.append(pd.NaT)
+
+    motif_arr = []
+    for i in range(n):
+        if resilie[i]:
+            if canal_arr[i]=="Comparateur":
+                motif_arr.append(rng.choice(motifs,p=[0.15,0.15,0.10,0.15,0.10,0.35]))
+            else:
+                motif_arr.append(rng.choice(motifs,p=[0.30,0.20,0.15,0.15,0.10,0.10]))
+        else:
+            motif_arr.append(None)
+
+    df = pd.DataFrame({
+        "num_contrat"          : [f"C{annee}{i:06d}" for i in range(n)],
+        "produit"              : produit_arr,
+        "canal"                : canal_arr,
+        "fractionnement"       : fraction_arr,
+        "nb_contrats_retenus"  : nb_contrats,
+        "anciennete_contrat"   : anciennete_cont,
+        "segment_client"       : segment_arr,
+        "age"                  : age,
+        "indice_client"        : indice_client,
+        "anciennete_client"    : anciennete_cli,
+        "bonus_malus"          : bonus_malus,
+        "region"               : region_arr,
+        "nb_sinistres_resp_12m": nb_sin,
+        "energie_voiture"      : energie_arr,
+        "prime_ttc"            : prime_ttc,
+        "prime_ttc_n1"         : prime_ttc_n1,
+        "date_resiliation"     : date_resil_arr,
+        "date_terme"           : date_terme_arr,
+        "motif_resiliation"    : motif_arr,
+        "annee"                : annee,
+    })
+    return df
+
+def enrich(df, annee):
+    df["annee"] = annee
+    df["date_resiliation"] = pd.to_datetime(df["date_resiliation"], errors="coerce")
+    df["resilie"]          = df["date_resiliation"].notna().astype(int)
+    df["mois_resiliation"] = df["date_resiliation"].dt.month
+    df["delta_prime"]      = df["prime_ttc"] - df["prime_ttc_n1"]
+    df["delta_prime_pct"]  = df["delta_prime"] / df["prime_ttc_n1"].replace(0,np.nan) * 100
+
+    df["tranche_age"] = pd.cut(df["age"],
+        bins=[0,25,35,45,55,65,120],
+        labels=["<25","25–35","35–45","45–55","55–65","65+"], right=False)
+    df["tranche_prime"] = pd.cut(df["prime_ttc"],
+        bins=[0,400,600,800,1000,1500,99999],
+        labels=["<400","400–600","600–800","800–1000","1 000–1 500","1 500+"])
+    df["anciennete_cl"] = pd.cut(df["anciennete_contrat"],
+        bins=[0,2,5,10,99], right=False,
+        labels=["0–2 ans","2–5 ans","5–10 ans","10+ ans"])
+    df["cl_delta"] = pd.cut(df["delta_prime_pct"].clip(-50,80),
+        bins=[-50,-10,-5,0,5,10,20,80],
+        labels=["<-10%","-10/–5%","–5/0%","0/+5%","+5/+10%","+10/+20%",">+20%"])
+    return df
+
+print("Génération des bases…")
+SIZES = {2022:15000, 2023:16500, 2024:17800, 2025:18500}
+bases = {}
+for an, n in SIZES.items():
+    bases[an] = enrich(generate_base(an, n, 40+an), an)
+    print(f"  [{an}] {n:,} contrats — taux : {bases[an]['resilie'].mean()*100:.2f}%")
+
+ANNEES = sorted(bases.keys())
+panel  = pd.concat(bases.values(), ignore_index=True)
+print(f"  Panel : {len(panel):,} lignes | taux global : {panel['resilie'].mean()*100:.2f}%\n")
+
+def metrics_annuelles(bases):
+    rows = []
+    for an, df in sorted(bases.items()):
+        res = df[df["resilie"]==1]
+        rows.append({
+            "annee"            : an,
+            "nb_contrats"      : len(df),
+            "nb_resilies"      : int(res.shape[0]),
+            "taux"             : df["resilie"].mean()*100,
+            "prime_global"     : df["prime_ttc"].mean(),
+            "prime_resilies"   : res["prime_ttc"].mean(),
+            "delta_prime_moy"  : df["delta_prime_pct"].mean(),
+        })
+    return pd.DataFrame(rows).set_index("annee")
+
+M = metrics_annuelles(bases)
+
+OUT = "/mnt/user-data/outputs/"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FIGURE 01 — EXECUTIVE SUMMARY (KPI CARDS + TAUX TREND)
+# ═════════════════════════════════════════════════════════════════════════════
+def fig01_executive(M):
+    fig = plt.figure(figsize=(16, 9))
+    mk_header(fig,
+        "Résiliation Automobile 2022–2025 — Vue Exécutive",
+        "Le taux de résiliation a progressé de +5,6 pp en 4 ans, porté par la hausse tarifaire et la pression des comparateurs")
+
+    gs = GridSpec(2, 4, figure=fig, hspace=0.55, wspace=0.45,
+                  left=0.06, right=0.97, top=0.88, bottom=0.10)
+
+    # ── KPI Cards (ligne 1) ──────────────────────────────────────────────
+    kpis = [
+        ("Taux 2025",          f"{M.loc[2025,'taux']:.1f}%",         "+5,6 pp vs 2022"),
+        ("Résiliés cumulés",   f"{M['nb_resilies'].sum():,.0f}",      "sur 4 ans"),
+        ("Prime moy. résiliés",f"{M.loc[2025,'prime_resilies']:,.0f}€","vs {:.0f}€ actifs".format(M.loc[2025,'prime_global'])),
+        ("Δ Prime 2024",       f"+{M.loc[2024,'delta_prime_moy']:.1f}%","pic inflationniste"),
+    ]
+    for i, (label, val, sub) in enumerate(kpis):
+        ax = fig.add_subplot(gs[0, i])
+        ax.set_xlim(0,1); ax.set_ylim(0,1)
+        ax.axis("off")
+        # Fond gris très clair
+        ax.add_patch(mpatches.FancyBboxPatch((0,0),1,1,
+            boxstyle="round,pad=0.03", facecolor="#F5F5F5",
+            edgecolor=MK_LGREY, linewidth=0.8, transform=ax.transAxes))
+        # Trait bleu en haut de la card
+        ax.add_patch(mpatches.FancyBboxPatch((0,0.88),1,0.12,
+            boxstyle="square,pad=0", facecolor=MK_NAVY,
+            transform=ax.transAxes, clip_on=True))
+        ax.text(0.5, 0.94, label.upper(), ha="center", va="center",
+                fontsize=7, color=WHITE, fontweight="bold",
+                transform=ax.transAxes, fontfamily="Georgia")
+        ax.text(0.5, 0.53, val, ha="center", va="center",
+                fontsize=22, color=MK_NAVY, fontweight="bold",
+                transform=ax.transAxes, fontfamily="Georgia")
+        ax.text(0.5, 0.20, sub, ha="center", va="center",
+                fontsize=8, color=MK_GREY, style="italic",
+                transform=ax.transAxes, fontfamily="Georgia")
+
+    # ── Trend taux + volume (ligne 2, span 2 cols) ───────────────────────
+    ax_main = fig.add_subplot(gs[1, :2])
+    ax_vol  = ax_main.twinx()
+
+    # Barres volume (axe secondaire — fond)
+    bar_w = 0.4
+    ax_vol.bar(M.index, M["nb_contrats"]/1000, width=bar_w,
+               color=MK_LGREY, alpha=0.6, zorder=1, label="Volume (k contrats)")
+    ax_vol.bar(M.index + bar_w, M["nb_resilies"]/1000, width=bar_w,
+               color=MK_LBLUE, alpha=0.8, zorder=1, label="Résiliés (k)")
+    ax_vol.set_ylabel("Milliers de contrats", color=MK_GREY, fontsize=8)
+    ax_vol.tick_params(axis="y", labelcolor=MK_GREY, labelsize=7)
+    ax_vol.spines["right"].set_color(MK_LGREY)
+    ax_vol.spines["top"].set_visible(False)
+    ax_vol.spines["left"].set_visible(False)
+    ax_vol.grid(False)
+    ax_vol.set_ylim(0, M["nb_contrats"].max()/1000 * 2)
+
+    # Courbe taux (axe principal — premier plan)
+    ax_main.plot(M.index, M["taux"], color=MK_NAVY, linewidth=2.5,
+                 marker="o", markersize=9, markerfacecolor=WHITE,
+                 markeredgecolor=MK_NAVY, markeredgewidth=2, zorder=5)
+    for x, y in zip(M.index, M["taux"]):
+        ax_main.text(x, y+0.4, f"{y:.1f}%", ha="center", fontsize=9,
+                     color=MK_NAVY, fontweight="bold", fontfamily="Georgia")
+
+    ax_main.set_ylim(0, M["taux"].max()*1.5)
+    ax_main.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f"{v:.0f}%"))
+    ax_main.set_xticks(M.index + bar_w/2)
+    ax_main.set_xticklabels(M.index)
+    spine_clean(ax_main)
+    section_label(ax_main, "Évolution du taux de résiliation")
+
+    # Légende manuelle
+    h1 = mlines.Line2D([],[], color=MK_NAVY, marker="o", markersize=6,
+                        markerfacecolor=WHITE, linewidth=2, label="Taux résiliation (%)")
+    h2 = mpatches.Patch(color=MK_LGREY, alpha=0.7, label="Volume total (k)")
+    h3 = mpatches.Patch(color=MK_LBLUE, alpha=0.9, label="Résiliés (k)")
+    ax_main.legend(handles=[h1,h2,h3], loc="upper left", fontsize=7, frameon=False)
+
+    # ── Variation de prime vs taux (ligne 2, col 2-3) ────────────────────
+    ax2 = fig.add_subplot(gs[1, 2:])
+    x = np.arange(len(ANNEES))
+    w = 0.32
+    bars_g = ax2.bar(x - w/2, M["prime_global"],   width=w, color=MK_LGREY,
+                     edgecolor="none", label="Prime moy. globale")
+    bars_r = ax2.bar(x + w/2, M["prime_resilies"], width=w, color=MK_NAVY,
+                     edgecolor="none", label="Prime moy. résiliés")
+    ax2.set_xticks(x); ax2.set_xticklabels(ANNEES)
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f"{v:,.0f}€"))
+    for bar in bars_r:
+        h = bar.get_height()
+        ax2.text(bar.get_x()+bar.get_width()/2, h+5, f"{h:,.0f}€",
+                 ha="center", fontsize=7, color=MK_NAVY, fontweight="bold")
+    spine_clean(ax2)
+    section_label(ax2, "Prime moyenne : globale vs résiliés (€)")
+    ax2.legend(fontsize=7, loc="upper left")
+
+    plt.savefig(OUT + "01_executive_summary.png")
+    plt.close()
+    print("✔ 01_executive_summary.png")
+
+fig01_executive(M)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FIGURE 02 — WATERFALL + DÉCOMPOSITION PAR CANAL
+# ═════════════════════════════════════════════════════════════════════════════
+def fig02_waterfall_canal(M, panel):
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7),
+                              gridspec_kw={"width_ratios":[1.2,1]})
+    fig.subplots_adjust(left=0.06, right=0.97, top=0.82, bottom=0.12, wspace=0.35)
+    mk_header(fig,
+        "Décomposition de la variation du taux — Waterfall & Canal",
+        "La hausse de 2024 (+2,5 pp) coïncide avec le pic inflationniste ; le canal Comparateur affiche un taux structurellement supérieur")
+
+    # ── Waterfall ─────────────────────────────────────────────────────────
+    ax = axes[0]
+    taux  = M["taux"].values
+    years = list(M.index)
+    running = taux[0]
+    bottoms = [0]; heights = [taux[0]]; colors_ = [MK_NAVY]; labels_ = [str(years[0])]
+    for i in range(1, len(years)):
+        d = taux[i] - taux[i-1]
+        bottoms.append(running if d>0 else running+d)
+        heights.append(abs(d))
+        colors_.append(MK_RED if d>0 else MK_GREEN)
+        labels_.append(str(years[i]))
+        running += d
+    x_pos = np.arange(len(years))
+    bars = ax.bar(x_pos, heights, bottom=bottoms, color=colors_,
+                  edgecolor="none", width=0.55, zorder=3)
+
+    # Connecteurs (lignes horizontales de liaison)
+    r = taux[0]
+    for i in range(1, len(years)):
+        d = taux[i]-taux[i-1]
+        ax.plot([i-1+0.275, i-0.275], [r,r], color=MK_LGREY,
+                linewidth=0.8, linestyle="--", zorder=4)
+        r += d
+
+    for i, (bot, h, c) in enumerate(zip(bottoms, heights, colors_)):
+        top = bot+h
+        sign = "" if i==0 else ("▲" if colors_[i]==MK_RED else "▼")
+        val  = taux[0] if i==0 else taux[i]-taux[i-1]
+        ax.text(i, top+0.12, f"{sign}{abs(val):.2f} pp",
+                ha="center", va="bottom", fontsize=9,
+                color=c if i>0 else MK_NAVY, fontweight="bold")
+
+    ax.set_xticks(x_pos); ax.set_xticklabels(years)
+    ax.set_ylim(0, max(taux)*1.4)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f"{v:.0f}%"))
+    spine_clean(ax)
+    section_label(ax, "Variation annuelle du taux de résiliation (pp)")
+    ax.legend(handles=[
+        mpatches.Patch(color=MK_NAVY, label="Base"),
+        mpatches.Patch(color=MK_RED,  label="Hausse"),
+        mpatches.Patch(color=MK_GREEN,label="Baisse")], fontsize=8)
+
+    # ── Taux par canal × année ────────────────────────────────────────────
+    ax2 = axes[1]
+    tmp = (panel.groupby(["annee","canal"], observed=True)["resilie"]
+           .mean()*100).reset_index()
+    tmp.columns = ["annee","canal","taux"]
+    canaux_ord = (tmp.groupby("canal")["taux"].mean()
+                  .sort_values(ascending=False).index)
+    CC = [MK_NAVY, MK_BLUE, "#48CAE4", MK_LGREY]
+
+    for j, canal in enumerate(canaux_ord):
+        sub = tmp[tmp["canal"]==canal]
+        ax2.plot(sub["annee"], sub["taux"], marker="o",
+                 color=CC[j], linewidth=2.2, markersize=7,
+                 markerfacecolor=WHITE, markeredgecolor=CC[j],
+                 markeredgewidth=2, label=canal)
+        # Étiquette fin de courbe
+        last = sub.iloc[-1]
+        ax2.text(last["annee"]+0.08, last["taux"],
+                 f"{last['taux']:.1f}%", fontsize=8, va="center",
+                 color=CC[j], fontweight="bold")
+
+    ax2.set_xlim(2021.8, 2025.8)
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f"{v:.0f}%"))
+    spine_clean(ax2)
+    section_label(ax2, "Taux de résiliation par canal — évolution annuelle")
+    ax2.legend(fontsize=8, loc="upper left")
+
+    plt.savefig(OUT + "02_waterfall_canal.png")
+    plt.close()
+    print("✔ 02_waterfall_canal.png")
+
+fig02_waterfall_canal(M, panel)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FIGURE 03 — MOTIFS & SAISONNALITÉ
+# ═════════════════════════════════════════════════════════════════════════════
+def fig03_motifs_saisonnalite(panel, bases):
+    fig, axes = plt.subplots(1, 3, figsize=(20, 7),
+                              gridspec_kw={"width_ratios":[1,1.3,1.1]})
+    fig.subplots_adjust(left=0.05, right=0.97, top=0.82, bottom=0.15, wspace=0.40)
+    mk_header(fig,
+        "Motifs et saisonnalité des résiliations",
+        "L'échéance principale concentre 30 % des départs ; un pic structurel est observé en décembre–janvier sur toutes les années")
+
+    # ── 1. Barres horizontales motifs (classement) ────────────────────────
+    ax = axes[0]
+    df_r = panel[panel["resilie"]==1]
+    motif = df_r["motif_resiliation"].value_counts(normalize=True)*100
+    motif_s = motif.sort_values()
+    colors_m = [MK_NAVY if i==len(motif_s)-1 else
+                (MK_BLUE if i==len(motif_s)-2 else MK_LGREY)
+                for i in range(len(motif_s))]
+    bars = ax.barh(motif_s.index, motif_s.values,
+                   color=colors_m, edgecolor="none", height=0.6)
+    for i, (v, name) in enumerate(zip(motif_s.values, motif_s.index)):
+        ax.text(v+0.3, i, f"{v:.1f}%", va="center", fontsize=8,
+                color=MK_NAVY if colors_m[i]==MK_NAVY else MK_GREY,
+                fontweight="bold")
+    ax.set_xlim(0, motif_s.max()*1.4)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f"{v:.0f}%"))
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.spines["bottom"].set_visible(True)
+    ax.spines["bottom"].set_color(MK_GREY)
+    ax.grid(axis="x"); ax.grid(axis="y", visible=False)
+    section_label(ax, "Répartition des motifs de résiliation (%)")
+
+    # ── 2. Heatmap saisonnalité ────────────────────────────────────────────
+    ax2 = axes[1]
+    MOIS = ["J","F","M","A","M","J","J","A","S","O","N","D"]
+    heat = (panel[panel["resilie"]==1]
+            .groupby(["annee","mois_resiliation"]).size().unstack(fill_value=0))
+    heat.columns = MOIS
+    # Normalisation par ligne (% du total annuel)
+    heat_pct = heat.div(heat.sum(axis=1),axis=0)*100
+    im = ax2.imshow(heat_pct.values, cmap=CMAP_MK, aspect="auto",
+                    vmin=0, vmax=heat_pct.values.max())
+    ax2.set_xticks(range(12)); ax2.set_xticklabels(MOIS, fontsize=8)
+    ax2.set_yticks(range(len(ANNEES))); ax2.set_yticklabels(ANNEES, fontsize=8)
+    for r in range(len(ANNEES)):
+        for c in range(12):
+            val = heat_pct.values[r,c]
+            ax2.text(c, r, f"{val:.1f}", ha="center", va="center",
+                     fontsize=7,
+                     color=WHITE if val>8 else MK_GREY,
+                     fontweight="bold" if val>heat_pct.values.max()*0.75 else "normal")
+    ax2.spines["top"].set_visible(False); ax2.spines["right"].set_visible(False)
+    ax2.spines["left"].set_visible(False); ax2.spines["bottom"].set_visible(True)
+    cb = plt.colorbar(im, ax=ax2, shrink=0.7, pad=0.03)
+    cb.set_label("% des résiliés annuels", fontsize=7, color=MK_GREY)
+    cb.ax.tick_params(labelsize=7)
+    section_label(ax2, "Saisonnalité mensuelle (% résiliés/an)")
+
+    # ── 3. Évolution composition motifs ──────────────────────────────────
+    ax3 = axes[2]
+    top6 = df_r["motif_resiliation"].value_counts().head(6).index
+    comp = (df_r[df_r["motif_resiliation"].isin(top6)]
+            .groupby(["annee","motif_resiliation"]).size()
+            .unstack(fill_value=0))
+    comp_pct = comp.div(comp.sum(axis=1), axis=0)*100
+    CC6 = [MK_NAVY, MK_BLUE, "#48CAE4", "#90E0EF", MK_ORANGE, MK_LGREY]
+    bottom = np.zeros(len(comp_pct))
+    for j, col in enumerate(comp_pct.columns):
+        vals = comp_pct[col].values
+        ax3.bar(comp_pct.index, vals, bottom=bottom,
+                color=CC6[j], edgecolor=WHITE, linewidth=0.5,
+                label=col, width=0.55)
+        # Étiquette si > 6%
+        for k, (v, b) in enumerate(zip(vals, bottom)):
+            if v > 6:
+                ax3.text(comp_pct.index[k], b+v/2, f"{v:.0f}%",
+                         ha="center", va="center", fontsize=7,
+                         color=WHITE if j<2 else MK_GREY, fontweight="bold")
+        bottom += vals
+    ax3.set_ylim(0,115)
+    ax3.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f"{v:.0f}%"))
+    ax3.set_xticks(list(comp_pct.index))
+    spine_clean(ax3)
+    section_label(ax3, "Composition des motifs par année (%)")
+    ax3.legend(fontsize=7, loc="lower center",
+               bbox_to_anchor=(0.5,-0.28), ncol=2)
+
+    plt.savefig(OUT + "03_motifs_saisonnalite.png")
+    plt.close()
+    print("✔ 03_motifs_saisonnalite.png")
+
+fig03_motifs_saisonnalite(panel, bases)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FIGURE 04 — PROFILAGE CLIENT (âge, segment, ancienneté)
+# ═════════════════════════════════════════════════════════════════════════════
+def fig04_profil_client(panel):
+    fig, axes = plt.subplots(1, 3, figsize=(20, 7))
+    fig.subplots_adjust(left=0.05, right=0.97, top=0.82, bottom=0.14, wspace=0.40)
+    mk_header(fig,
+        "Profilage des assurés résiliataires",
+        "Les jeunes conducteurs (<25 ans, canal comparateur) présentent un taux 2× supérieur à la moyenne du portefeuille")
+
+    # ── 1. Lollipop taux par tranche d'âge ───────────────────────────────
+    ax = axes[0]
+    tmp = (panel.groupby("tranche_age", observed=True)
+           .agg(nb=("resilie","count"), res=("resilie","sum"))
+           .assign(taux=lambda d: d["res"]/d["nb"]*100))
+    moy = panel["resilie"].mean()*100
+    y   = np.arange(len(tmp))
+    # Ligne de référence
+    ax.axvline(moy, color=MK_LGREY, linewidth=1.2, linestyle="--", zorder=1)
+    ax.text(moy+0.1, len(tmp)-0.3, f"Moy. {moy:.1f}%", fontsize=7,
+            color=MK_GREY, style="italic")
+    # Tiges
+    for i, (idx, row) in enumerate(tmp.iterrows()):
+        color = MK_RED if row["taux"]>moy else MK_NAVY
+        ax.hlines(i, moy, row["taux"], color=MK_LGREY, linewidth=1.5)
+        ax.scatter(row["taux"], i, color=color, s=80, zorder=5)
+        ax.text(row["taux"]+0.15, i, f"{row['taux']:.1f}%",
+                va="center", fontsize=8, color=color, fontweight="bold")
+    ax.set_yticks(y); ax.set_yticklabels(tmp.index.astype(str), fontsize=8)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f"{v:.0f}%"))
+    ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.grid(axis="x"); ax.grid(axis="y", visible=False)
+    section_label(ax, "Taux de résiliation par tranche d'âge")
+    ax.legend(handles=[
+        mpatches.Patch(color=MK_RED,  label="Au-dessus moyenne"),
+        mpatches.Patch(color=MK_NAVY, label="En-dessous moyenne")], fontsize=7)
+
+    # ── 2. Barres groupées segment × année ───────────────────────────────
+    ax2 = axes[1]
+    segs = panel["segment_client"].unique()
+    tmp2 = (panel.groupby(["annee","segment_client"], observed=True)["resilie"]
+            .mean()*100).unstack()
+    x  = np.arange(len(ANNEES))
+    w  = 0.20
+    CC = [MK_NAVY, MK_BLUE, "#48CAE4", MK_LGREY]
+    for j, seg in enumerate(tmp2.columns):
+        ax2.bar(x + j*w - w*len(tmp2.columns)/2, tmp2[seg].values,
+                width=w*0.9, color=CC[j], edgecolor="none", label=seg)
+    ax2.set_xticks(x); ax2.set_xticklabels(ANNEES)
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f"{v:.0f}%"))
+    ax2.axhline(panel["resilie"].mean()*100, color=MK_GREY,
+                linewidth=1, linestyle="--", alpha=0.6)
+    spine_clean(ax2)
+    section_label(ax2, "Taux de résiliation par segment client et par année")
+    ax2.legend(fontsize=7)
+
+    # ── 3. Matrice ancienneté × tranche d'âge ────────────────────────────
+    ax3 = axes[2]
+    heat = (panel.groupby(["tranche_age","anciennete_cl"], observed=True)["resilie"]
+            .mean()*100).unstack(fill_value=0)
+    im = ax3.imshow(heat.values, cmap=CMAP_MK, aspect="auto")
+    ax3.set_xticks(range(len(heat.columns)))
+    ax3.set_xticklabels(heat.columns.astype(str), fontsize=7, rotation=20)
+    ax3.set_yticks(range(len(heat.index)))
+    ax3.set_yticklabels(heat.index.astype(str), fontsize=7)
+    for r in range(heat.shape[0]):
+        for c in range(heat.shape[1]):
+            v = heat.values[r,c]
+            ax3.text(c, r, f"{v:.1f}%", ha="center", va="center",
+                     fontsize=7, color=WHITE if v>12 else MK_GREY,
+                     fontweight="bold" if v>15 else "normal")
+    cb = plt.colorbar(im, ax=ax3, shrink=0.75, pad=0.03)
+    cb.set_label("Taux résiliation (%)", fontsize=7, color=MK_GREY)
+    cb.ax.tick_params(labelsize=7)
+    ax3.spines["top"].set_visible(False); ax3.spines["right"].set_visible(False)
+    ax3.spines["left"].set_visible(False)
+    section_label(ax3, "Heatmap taux : Âge × Ancienneté contrat (%)")
+
+    plt.savefig(OUT + "04_profil_client.png")
+    plt.close()
+    print("✔ 04_profil_client.png")
+
+fig04_profil_client(panel)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FIGURE 05 — ANALYSE TARIFAIRE
+# ═════════════════════════════════════════════════════════════════════════════
+def fig05_tarif(panel):
+    fig, axes = plt.subplots(1, 3, figsize=(20, 7))
+    fig.subplots_adjust(left=0.05, right=0.97, top=0.82, bottom=0.14, wspace=0.42)
+    mk_header(fig,
+        "Impact tarifaire sur la résiliation",
+        "Une hausse de prime supérieure à +10 % multiplie par 2,3 le taux de résiliation ; le segment Tiers Simple est le plus élastique au prix")
+
+    # ── 1. Taux par variation de prime (slope chart) ──────────────────────
+    ax = axes[0]
+    tmp = (panel.groupby("cl_delta", observed=True)
+           .agg(nb=("resilie","count"), res=("resilie","sum"))
+           .assign(taux=lambda d: d["res"]/d["nb"]*100))
+    x  = np.arange(len(tmp))
+    moy = panel["resilie"].mean()*100
+    colors_bar = [MK_GREEN if "<" in str(i) or "–5" in str(i) or "0" in str(i)
+                  else (MK_RED if "+10" in str(i) or "+20" in str(i) or ">+20" in str(i)
+                        else MK_BLUE)
+                  for i in tmp.index]
+    ax.bar(x, tmp["taux"].values, color=colors_bar, edgecolor="none", width=0.65)
+    ax.axhline(moy, color=MK_GREY, linewidth=1, linestyle="--")
+    ax.text(len(tmp)-1, moy+0.2, f"Moy. {moy:.1f}%",
+            fontsize=7, color=MK_GREY, ha="right", style="italic")
+    for xi, v in zip(x, tmp["taux"].values):
+        ax.text(xi, v+0.15, f"{v:.1f}%", ha="center", fontsize=8,
+                color=MK_NAVY, fontweight="bold")
+    ax.set_xticks(x); ax.set_xticklabels(tmp.index.astype(str),
+                                          rotation=35, ha="right", fontsize=7)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f"{v:.0f}%"))
+    spine_clean(ax)
+    section_label(ax, "Taux de résiliation par variation de prime (N vs N–1)")
+
+    # ── 2. Tranche de prime × canal (heatmap) ────────────────────────────
+    ax2 = axes[1]
+    heat = (panel.groupby(["tranche_prime","canal"], observed=True)["resilie"]
+            .mean()*100).unstack(fill_value=0)
+    im = ax2.imshow(heat.values, cmap=CMAP_MK, aspect="auto")
+    ax2.set_xticks(range(len(heat.columns)))
+    ax2.set_xticklabels(heat.columns.astype(str), fontsize=8, rotation=30)
+    ax2.set_yticks(range(len(heat.index)))
+    ax2.set_yticklabels(heat.index.astype(str), fontsize=8)
+    for r in range(heat.shape[0]):
+        for c in range(heat.shape[1]):
+            v = heat.values[r,c]
+            ax2.text(c, r, f"{v:.1f}%", ha="center", va="center",
+                     fontsize=8, color=WHITE if v>13 else MK_GREY,
+                     fontweight="bold" if v>16 else "normal")
+    plt.colorbar(im, ax=ax2, shrink=0.75, pad=0.03).set_label(
+        "Taux résiliation (%)", fontsize=7, color=MK_GREY)
+    ax2.spines["top"].set_visible(False); ax2.spines["right"].set_visible(False)
+    ax2.spines["left"].set_visible(False)
+    section_label(ax2, "Heatmap taux : Tranche de prime × Canal (%)")
+
+    # ── 3. Boxplot prime résiliés vs actifs par année ─────────────────────
+    ax3 = axes[2]
+    data_box, pos_box, colors_box, labels_box = [], [], [], []
+    for i, an in enumerate(ANNEES):
+        df_an = bases[an]
+        data_box.append(df_an.loc[df_an["resilie"]==0,"prime_ttc"].dropna().values)
+        data_box.append(df_an.loc[df_an["resilie"]==1,"prime_ttc"].dropna().values)
+        pos_box  += [i*2.5, i*2.5+0.9]
+        colors_box+= [MK_LGREY, MK_NAVY]
+        labels_box+= [str(an), ""]
+
+    bp = ax3.boxplot(data_box, positions=pos_box, patch_artist=True,
+                     widths=0.7, showfliers=False,
+                     medianprops=dict(color=MK_ORANGE, linewidth=2),
+                     whiskerprops=dict(color=MK_GREY, linewidth=0.8),
+                     capprops=dict(color=MK_GREY, linewidth=0.8))
+    for patch, col in zip(bp["boxes"], colors_box):
+        patch.set_facecolor(col); patch.set_alpha(0.75); patch.set_edgecolor("none")
+
+    ax3.set_xticks([i*2.5+0.45 for i in range(len(ANNEES))])
+    ax3.set_xticklabels(ANNEES)
+    ax3.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f"{v:,.0f}€"))
+    spine_clean(ax3)
+    section_label(ax3, "Distribution de prime — Actifs vs Résiliés par année")
+    ax3.legend(handles=[mpatches.Patch(color=MK_LGREY, alpha=0.75, label="Actifs"),
+                        mpatches.Patch(color=MK_NAVY,  alpha=0.75, label="Résiliés")],
+               fontsize=8)
+
+    plt.savefig(OUT + "05_analyse_tarifaire.png")
+    plt.close()
+    print("✔ 05_analyse_tarifaire.png")
+
+fig05_tarif(panel)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FIGURE 06 — HEATMAPS CROISÉES McKINSEY (3 × 2)
+# ═════════════════════════════════════════════════════════════════════════════
+def fig06_heatmaps(panel):
+    fig, axes = plt.subplots(2, 3, figsize=(22, 13))
+    fig.subplots_adjust(left=0.05, right=0.97, top=0.85, bottom=0.08,
+                        hspace=0.50, wspace=0.38)
+    mk_header(fig,
+        "Matrice de risque — Croisements multi-variables",
+        "Les zones rouge foncé identifient les combinaisons profil × produit × canal à risque maximal de résiliation")
+
+    CROSSES = [
+        ("tranche_age",    "canal",           "Âge × Canal"),
+        ("tranche_age",    "produit",          "Âge × Produit"),
+        ("segment_client", "anciennete_cl",    "Segment × Ancienneté contrat"),
+        ("tranche_prime",  "canal",            "Tranche prime × Canal"),
+        ("tranche_prime",  "segment_client",   "Tranche prime × Segment"),
+        ("energie_voiture","region",           "Énergie × Région"),
+    ]
+    for ax, (v1, v2, titre) in zip(axes.flatten(), CROSSES):
+        if v1 not in panel.columns or v2 not in panel.columns:
+            ax.axis("off"); continue
+        heat = (panel.groupby([v1,v2], observed=True)["resilie"]
+                .agg(["sum","count"]).eval("t=sum/count*100")["t"]
+                .unstack(fill_value=0))
+        # Top modalités
+        top_r = heat.mean(axis=1).sort_values(ascending=False).head(7).index
+        top_c = heat.mean(axis=0).sort_values(ascending=False).head(5).index
+        heat  = heat.loc[top_r, top_c]
+        im    = ax.imshow(heat.values, cmap=CMAP_MK, aspect="auto")
+        ax.set_xticks(range(len(heat.columns)))
+        ax.set_xticklabels(heat.columns.astype(str), fontsize=7, rotation=30, ha="right")
+        ax.set_yticks(range(len(heat.index)))
+        ax.set_yticklabels(heat.index.astype(str), fontsize=7)
+        vmax = heat.values.max()
+        for r in range(heat.shape[0]):
+            for c in range(heat.shape[1]):
+                v = heat.values[r,c]
+                ax.text(c, r, f"{v:.1f}%", ha="center", va="center",
+                        fontsize=7.5,
+                        color=WHITE if v > vmax*0.60 else MK_GREY,
+                        fontweight="bold" if v > vmax*0.75 else "normal")
+        cb = plt.colorbar(im, ax=ax, shrink=0.80, pad=0.03)
+        cb.set_label("%", fontsize=7, color=MK_GREY)
+        cb.ax.tick_params(labelsize=7)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_visible(False)
+        ax.spines["bottom"].set_visible(True)
+        ax.spines["bottom"].set_color(MK_LGREY)
+        ax.set_title(titre, loc="left", fontsize=9, fontweight="bold",
+                     color=BLACK, pad=6, fontfamily="Georgia")
+
+    plt.savefig(OUT + "06_heatmaps_croises.png")
+    plt.close()
+    print("✔ 06_heatmaps_croises.png")
+
+fig06_heatmaps(panel)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FIGURE 07 — SINISTRALITÉ & DIFFÉRENCIATION PROFIL
+# ═════════════════════════════════════════════════════════════════════════════
+def fig07_sinistres_profil(panel):
+    fig, axes = plt.subplots(1, 3, figsize=(20, 7))
+    fig.subplots_adjust(left=0.05, right=0.97, top=0.82, bottom=0.14, wspace=0.42)
+    mk_header(fig,
+        "Sinistralité, bonus/malus et profil différentiel",
+        "Les assurés avec 2+ sinistres responsables affichent un taux de résiliation 1,8× supérieur, corrélé à une hausse de B/M")
+
+    # ── 1. Taux résiliation par nb sinistres ──────────────────────────────
+    ax = axes[0]
+    panel["cl_sin"] = panel["nb_sinistres_resp_12m"].clip(0,3).astype(int)
+    panel.loc[panel["nb_sinistres_resp_12m"]>3,"cl_sin"] = 4
+    SL  = {0:"0",1:"1",2:"2",3:"3",4:"4+"}
+    tmp = (panel.groupby("cl_sin")
+           .agg(nb=("resilie","count"), res=("resilie","sum"))
+           .assign(taux=lambda d: d["res"]/d["nb"]*100,
+                   vol=lambda d: d["nb"]/d["nb"].sum()*100))
+    moy = panel["resilie"].mean()*100
+    col_sin = [MK_NAVY if v>moy else MK_LGREY for v in tmp["taux"]]
+    ax.bar([SL[i] for i in tmp.index], tmp["taux"], color=col_sin,
+           edgecolor="none", width=0.55)
+    ax.axhline(moy, color=MK_GREY, linewidth=1, linestyle="--")
+    for xi, v in zip(range(len(tmp)), tmp["taux"]):
+        ax.text(xi, v+0.15, f"{v:.1f}%", ha="center", fontsize=9,
+                color=MK_NAVY, fontweight="bold")
+    ax.set_xlabel("Nb sinistres responsables (12 mois)", fontsize=8, color=MK_GREY)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f"{v:.0f}%"))
+    spine_clean(ax)
+    section_label(ax, "Taux de résiliation selon la sinistralité")
+
+    # ── 2. Scatter bonus/malus vs prime (résiliés surlignés) ──────────────
+    ax2 = axes[1]
+    sample = panel.sample(min(3000, len(panel)), random_state=42)
+    actifs  = sample[sample["resilie"]==0]
+    resilies= sample[sample["resilie"]==1]
+    ax2.scatter(actifs["bonus_malus"], actifs["prime_ttc"],
+                color=MK_LGREY, alpha=0.3, s=8, zorder=1, label="Actifs")
+    ax2.scatter(resilies["bonus_malus"], resilies["prime_ttc"],
+                color=MK_NAVY, alpha=0.6, s=12, zorder=2, label="Résiliés")
+    ax2.set_xlabel("Coefficient Bonus/Malus", fontsize=8, color=MK_GREY)
+    ax2.set_ylabel("Prime TTC (€)", fontsize=8, color=MK_GREY)
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f"{v:,.0f}€"))
+    spine_clean(ax2)
+    section_label(ax2, "Nuage de points B/M × Prime — Actifs vs Résiliés")
+    ax2.legend(fontsize=8)
+
+    # ── 3. Différence standardisée (profil actuariel) ─────────────────────
+    ax3 = axes[2]
+    VARS = [v for v in ["age","anciennete_contrat","anciennete_client",
+                         "bonus_malus","prime_ttc","nb_sinistres_resp_12m",
+                         "nb_contrats_retenus","delta_prime_pct"]
+            if v in panel.columns]
+    LABELS_FR = {
+        "age":"Âge","anciennete_contrat":"Ancienneté\ncontrat",
+        "anciennete_client":"Ancienneté\nclient","bonus_malus":"Bonus/Malus",
+        "prime_ttc":"Prime TTC","nb_sinistres_resp_12m":"Nb sinistres\nresp.",
+        "nb_contrats_retenus":"Nb contrats\nretenus","delta_prime_pct":"Δ Prime %"
+    }
+    diff = ((panel[panel["resilie"]==1][VARS].mean()
+             - panel[panel["resilie"]==0][VARS].mean())
+            / panel[VARS].std().replace(0,np.nan))
+    diff_s = diff.sort_values()
+    colors_d = [MK_RED if v>0 else MK_GREEN for v in diff_s.values]
+    ax3.barh([LABELS_FR.get(k,k) for k in diff_s.index], diff_s.values,
+             color=colors_d, edgecolor="none", height=0.6)
+    ax3.axvline(0, color=MK_GREY, linewidth=1)
+    for i, v in enumerate(diff_s.values):
+        sign = "+" if v>0 else ""
+        ax3.text(v+(0.03 if v>0 else -0.03), i,
+                 f"{sign}{v:.2f}σ", va="center", fontsize=8,
+                 ha="left" if v>0 else "right",
+                 color=colors_d[i], fontweight="bold")
+    ax3.spines["top"].set_visible(False); ax3.spines["right"].set_visible(False)
+    ax3.spines["left"].set_visible(False)
+    ax3.grid(axis="x"); ax3.grid(axis="y", visible=False)
+    section_label(ax3, "Profil différentiel Résiliés − Actifs (en σ)")
+    ax3.legend(handles=[
+        mpatches.Patch(color=MK_RED,   label="Résiliés > Actifs"),
+        mpatches.Patch(color=MK_GREEN, label="Résiliés < Actifs")], fontsize=8)
+
+    plt.savefig(OUT + "07_sinistres_profil.png")
+    plt.close()
+    print("✔ 07_sinistres_profil.png")
+
+fig07_sinistres_profil(panel)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FIGURE 08 — SYNTHÈSE STRATÉGIQUE : MATRICE RISQUE × VOLUME
+# ═════════════════════════════════════════════════════════════════════════════
+def fig08_matrice_strategique(panel):
+    """
+    Matrice 2×2 McKinsey : axe X = taux de résiliation, axe Y = volume de contrats.
+    Chaque point = un segment (canal × produit). Taille = prime moyenne.
+    Quadrants : Surveiller | Priorité absolue | Stable | Optimiser.
+    """
+    fig, ax = plt.subplots(figsize=(14, 9))
+    fig.subplots_adjust(left=0.10, right=0.88, top=0.82, bottom=0.12)
+    mk_header(fig,
+        "Matrice Stratégique de Risque de Résiliation",
+        "Positionnement des segments canal × produit — taille du cercle proportionnelle à la prime moyenne")
+
+    tmp = (panel.groupby(["canal","produit"], observed=True)
+           .agg(nb=("resilie","count"),
+                res=("resilie","sum"),
+                prime=("prime_ttc","mean"))
+           .assign(taux=lambda d: d["res"]/d["nb"]*100)
+           .reset_index())
+
+    taux_moy = tmp["taux"].mean()
+    vol_moy  = tmp["nb"].mean()
+
+    # Quadrants
+    ax.axvline(taux_moy, color=MK_LGREY, linewidth=1.2, zorder=1)
+    ax.axhline(vol_moy,  color=MK_LGREY, linewidth=1.2, zorder=1)
+
+    # Labels quadrants
+    for txt, xy, ha in [
+        ("SURVEILLER\n(faible taux, fort vol.)", (taux_moy*0.5, vol_moy*1.4), "center"),
+        ("PRIORITÉ ABSOLUE\n(fort taux, fort vol.)",  (taux_moy*1.5, vol_moy*1.4), "center"),
+        ("STABLE\n(faible taux, faible vol.)", (taux_moy*0.5, vol_moy*0.55), "center"),
+        ("OPTIMISER\n(fort taux, faible vol.)",  (taux_moy*1.5, vol_moy*0.55), "center"),
+    ]:
+        ax.text(xy[0], xy[1], txt, ha=ha, va="center", fontsize=8,
+                color=MK_LGREY, style="italic", fontfamily="Georgia")
+
+    # Bulles
+    size_scale = 5000 / tmp["prime"].max()
+    CC = [MK_NAVY, MK_BLUE, "#48CAE4", MK_ORANGE]
+    canaux = tmp["canal"].unique()
+    for j, canal in enumerate(canaux):
+        sub = tmp[tmp["canal"]==canal]
+        sc  = ax.scatter(sub["taux"], sub["nb"],
+                         s=sub["prime"]*size_scale,
+                         color=CC[j % len(CC)], alpha=0.75,
+                         edgecolors=WHITE, linewidth=1.5,
+                         label=canal, zorder=5)
+        for _, row in sub.iterrows():
+            ax.annotate(row["produit"],
+                        xy=(row["taux"], row["nb"]),
+                        xytext=(5, 4), textcoords="offset points",
+                        fontsize=7.5, color=CC[j % len(CC)],
+                        fontweight="bold", fontfamily="Georgia")
+
+    ax.set_xlabel("Taux de résiliation (%)", fontsize=9, color=MK_GREY)
+    ax.set_ylabel("Volume de contrats", fontsize=9, color=MK_GREY)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f"{v:.0f}%"))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f"{v:,.0f}"))
+    ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+    ax.grid(color=MK_LGREY, linestyle="-", linewidth=0.4, alpha=0.6)
+
+    # Légende taille bulle
+    for pval, plabel in [(500,"Prime 500€"),(1000,"Prime 1000€"),(1500,"Prime 1500€")]:
+        ax.scatter([], [], s=pval*size_scale, color=MK_LGREY, alpha=0.5,
+                   edgecolors=WHITE, label=plabel)
+
+    ax.legend(fontsize=8, loc="upper right",
+              title="Canal / Prime moyenne", title_fontsize=8, frameon=False)
+    section_label(ax, "Canal × Produit — Taux résiliation vs Volume (bulle = prime moyenne)")
+
+    plt.savefig(OUT + "08_matrice_strategique.png")
+    plt.close()
+    print("✔ 08_matrice_strategique.png")
+
+fig08_matrice_strategique(panel)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SYNTHÈSE CONSOLE
+# ═════════════════════════════════════════════════════════════════════════════
+print("\n" + "─"*65)
+print("  SYNTHÈSE — RÉSULTATS CLÉS")
+print("─"*65)
+for an in ANNEES:
+    df = bases[an]
+    print(f"  [{an}]  {len(df):,} contrats | {df['resilie'].sum():,} résiliés "
+          f"| taux : {df['resilie'].mean()*100:.2f}% "
+          f"| Δ prime : {df['delta_prime_pct'].mean():+.1f}%")
+print(f"\n  Taux moyen global     : {panel['resilie'].mean()*100:.2f}%")
+print(f"  Canal + résiliataire  : {panel.groupby('canal',observed=True)['resilie'].mean().idxmax()}")
+print(f"  Segment + sensible    : {panel.groupby('segment_client',observed=True)['resilie'].mean().idxmax()}")
+print(f"  Tranche âge critique  : {panel.groupby('tranche_age',observed=True)['resilie'].mean().idxmax()}")
+print(f"  Motif dominant        : {panel[panel['resilie']==1]['motif_resiliation'].value_counts().idxmax()}")
+print("\n  8 graphiques sauvegardés dans /mnt/user-data/outputs/")
+print("─"*65)
