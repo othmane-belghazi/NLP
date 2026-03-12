@@ -1,1060 +1,228 @@
-"""
-=============================================================================
-PIPELINE PYSPARK - ANALYSE DES RÉSILIATIONS ASSURANCE AUTO
-=============================================================================
-Objectifs:
-  1. Jointure base 2025 (résiliés) avec bases 2024/2023/2022 (historique tarifaire)
-  2. Feature Engineering: effet cumul majorations, seuils psychologiques, écarts
-  3. Clustering des profils résiliés
-=============================================================================
-"""
-
-from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
-from pyspark.sql.window import Window
-from pyspark.sql.types import *
-from pyspark.ml.feature import VectorAssembler, StandardScaler
-from pyspark.ml.clustering import KMeans
-from pyspark.ml import Pipeline
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 0. INITIALISATION SPARK
-# ─────────────────────────────────────────────────────────────────────────────
-spark = SparkSession.builder \
-    .appName("Resiliation_Auto_Analysis") \
-    .config("spark.sql.shuffle.partitions", "200") \
-    .getOrCreate()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. CHARGEMENT DES BASES
-# ─────────────────────────────────────────────────────────────────────────────
-# Adapter les chemins selon votre environnement
-base_2025 = spark.read.parquet("hdfs:///data/auto/base_resilies_2025.parquet")
-base_2024 = spark.read.parquet("hdfs:///data/auto/base_portefeuille_2024.parquet")
-base_2023 = spark.read.parquet("hdfs:///data/auto/base_portefeuille_2023.parquet")
-base_2022 = spark.read.parquet("hdfs:///data/auto/base_portefeuille_2022.parquet")
-
-# Colonnes attendues communes:
-# id_client, prime_proposee, prime_avant (prime précédente), bonus_malus,
-# age_conducteur, anciennete_permis, type_vehicule, puissance_fiscale,
-# zone_geographique, nb_sinistres, mode_paiement, fractionnement, ...
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. JOINTURE HISTORIQUE TARIFAIRE (LEFT JOIN)
-# ─────────────────────────────────────────────────────────────────────────────
-# Sélectionner uniquement les colonnes tarifaires des bases historiques
-cols_tarif = ["id_client", "prime_proposee", "prime_avant", "bonus_malus"]
-
-hist_2024 = base_2024.select(
-    [F.col(c).alias(f"{c}_2024") if c != "id_client" else F.col(c) for c in cols_tarif]
-)
-hist_2023 = base_2023.select(
-    [F.col(c).alias(f"{c}_2023") if c != "id_client" else F.col(c) for c in cols_tarif]
-)
-hist_2022 = base_2022.select(
-    [F.col(c).alias(f"{c}_2022") if c != "id_client" else F.col(c) for c in cols_tarif]
-)
-
-# Jointures LEFT pour garder tous les résiliés 2025
-# (les nouveaux clients n'auront pas de correspondance => null)
-df = base_2025.alias("b25") \
-    .join(hist_2024.alias("h24"), "id_client", "left") \
-    .join(hist_2023.alias("h23"), "id_client", "left") \
-    .join(hist_2022.alias("h22"), "id_client", "left")
-
-# Flag: nouveau client (pas trouvé dans les bases antérieures)
-df = df.withColumn(
-    "is_nouveau_client",
-    F.when(
-        F.col("prime_proposee_2024").isNull() &
-        F.col("prime_proposee_2023").isNull() &
-        F.col("prime_proposee_2022").isNull(),
-        1
-    ).otherwise(0)
-)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. FEATURE ENGINEERING - VARIABLES TARIFAIRES DYNAMIQUES
-# ─────────────────────────────────────────────────────────────────────────────
-
-# --- 3A. MAJORATIONS ANNUELLES (en euros et en %) ---
-df = df.withColumn(
-    "majoration_2023_2024",
-    F.when(F.col("prime_proposee_2023").isNotNull(),
-           F.col("prime_proposee_2024") - F.col("prime_proposee_2023"))
-).withColumn(
-    "majoration_2024_2025",
-    F.when(F.col("prime_proposee_2024").isNotNull(),
-           F.col("prime_proposee") - F.col("prime_proposee_2024"))
-).withColumn(
-    "majoration_2022_2023",
-    F.when(F.col("prime_proposee_2022").isNotNull(),
-           F.col("prime_proposee_2023") - F.col("prime_proposee_2022"))
-)
-
-# Majorations en pourcentage
-df = df.withColumn(
-    "pct_majoration_2024_2025",
-    F.when(F.col("prime_proposee_2024") > 0,
-           (F.col("prime_proposee") - F.col("prime_proposee_2024")) / F.col("prime_proposee_2024") * 100)
-).withColumn(
-    "pct_majoration_2023_2024",
-    F.when(F.col("prime_proposee_2023") > 0,
-           (F.col("prime_proposee_2024") - F.col("prime_proposee_2023")) / F.col("prime_proposee_2023") * 100)
-).withColumn(
-    "pct_majoration_2022_2023",
-    F.when(F.col("prime_proposee_2022") > 0,
-           (F.col("prime_proposee_2023") - F.col("prime_proposee_2022")) / F.col("prime_proposee_2022") * 100)
-)
-
-# --- 3B. EFFET CUMUL DES MAJORATIONS ---
-# Nombre d'années consécutives avec majoration
-df = df.withColumn(
-    "nb_annees_hausse_consecutive",
-    (F.when(F.col("majoration_2024_2025") > 0, 1).otherwise(0) +
-     F.when(F.col("majoration_2023_2024") > 0, 1).otherwise(0) +
-     F.when(F.col("majoration_2022_2023") > 0, 1).otherwise(0))
-)
-
-# Cumul total de majoration depuis la première prime connue
-df = df.withColumn(
-    "premiere_prime_connue",
-    F.coalesce(
-        F.col("prime_proposee_2022"),
-        F.col("prime_proposee_2023"),
-        F.col("prime_proposee_2024"),
-        F.col("prime_proposee")
-    )
-)
-
-df = df.withColumn(
-    "cumul_majoration_totale_euros",
-    F.col("prime_proposee") - F.col("premiere_prime_connue")
-)
-
-df = df.withColumn(
-    "cumul_majoration_totale_pct",
-    F.when(F.col("premiere_prime_connue") > 0,
-           (F.col("prime_proposee") - F.col("premiere_prime_connue")) / F.col("premiere_prime_connue") * 100)
-)
-
-# Accélération de la hausse (hausse dernière année vs hausse année précédente)
-df = df.withColumn(
-    "acceleration_hausse",
-    F.when(
-        F.col("majoration_2023_2024").isNotNull() & (F.col("majoration_2023_2024") != 0),
-        F.col("majoration_2024_2025") / F.abs(F.col("majoration_2023_2024"))
-    )
-)
-
-# Score de pression tarifaire (pondéré par récence)
-df = df.withColumn(
-    "score_pression_tarifaire",
-    (F.coalesce(F.col("pct_majoration_2024_2025"), F.lit(0)) * 3 +
-     F.coalesce(F.col("pct_majoration_2023_2024"), F.lit(0)) * 2 +
-     F.coalesce(F.col("pct_majoration_2022_2023"), F.lit(0)) * 1) / 6
-)
-
-# --- 3C. EFFET PSYCHOLOGIQUE - PASSAGE EN CENTAINE D'EUROS ---
-# Centaine de la prime actuelle vs centaine de la prime précédente
-df = df.withColumn(
-    "centaine_prime_2025",
-    F.floor(F.col("prime_proposee") / 100) * 100
-).withColumn(
-    "centaine_prime_2024",
-    F.when(F.col("prime_proposee_2024").isNotNull(),
-           F.floor(F.col("prime_proposee_2024") / 100) * 100)
-)
-
-# Flag: franchissement d'un seuil de centaine
-df = df.withColumn(
-    "franchissement_centaine",
-    F.when(
-        F.col("centaine_prime_2024").isNotNull() &
-        (F.col("centaine_prime_2025") > F.col("centaine_prime_2024")),
-        1
-    ).otherwise(0)
-)
-
-# Nombre de centaines franchies
-df = df.withColumn(
-    "nb_centaines_franchies",
-    F.when(
-        F.col("centaine_prime_2024").isNotNull(),
-        (F.col("centaine_prime_2025") - F.col("centaine_prime_2024")) / 100
-    ).otherwise(0).cast("int")
-)
-
-# Proximité au seuil supérieur (combien manque pour la prochaine centaine)
-df = df.withColumn(
-    "distance_prochaine_centaine",
-    (F.ceil(F.col("prime_proposee") / 100) * 100) - F.col("prime_proposee")
-)
-
-# Flag: prime juste au-dessus d'un seuil (0-15€ au-dessus)
-df = df.withColumn(
-    "juste_au_dessus_seuil",
-    F.when(
-        (F.col("prime_proposee") % 100 <= 15) & (F.col("prime_proposee") % 100 > 0),
-        1
-    ).otherwise(0)
-)
-
-# --- 3D. ÉCART PREMIÈRE PRIME TROUVÉE vs DERNIÈRE PROPOSÉE ---
-df = df.withColumn(
-    "ecart_premiere_derniere_euros",
-    F.col("prime_proposee") - F.col("premiere_prime_connue")
-)
-
-df = df.withColumn(
-    "ecart_premiere_derniere_pct",
-    F.when(F.col("premiere_prime_connue") > 0,
-           (F.col("prime_proposee") - F.col("premiere_prime_connue")) / F.col("premiere_prime_connue") * 100)
-)
-
-# Ratio prime actuelle / première prime
-df = df.withColumn(
-    "ratio_prime_actuelle_premiere",
-    F.when(F.col("premiere_prime_connue") > 0,
-           F.col("prime_proposee") / F.col("premiere_prime_connue"))
-)
-
-# --- 3E. VARIABLES DE PROFIL ENRICHIES ---
-# Tranche de prime (buckets)
-df = df.withColumn(
-    "tranche_prime",
-    F.when(F.col("prime_proposee") < 300, "< 300€")
-     .when(F.col("prime_proposee") < 500, "300-500€")
-     .when(F.col("prime_proposee") < 700, "500-700€")
-     .when(F.col("prime_proposee") < 1000, "700-1000€")
-     .otherwise(">= 1000€")
-)
-
-# Ancienneté dans le portefeuille (nb d'années retrouvées)
-df = df.withColumn(
-    "anciennete_portefeuille",
-    (F.when(F.col("prime_proposee_2024").isNotNull(), 1).otherwise(0) +
-     F.when(F.col("prime_proposee_2023").isNotNull(), 1).otherwise(0) +
-     F.when(F.col("prime_proposee_2022").isNotNull(), 1).otherwise(0))
-)
-
-# Volatilité tarifaire (écart-type des majorations)
-df = df.withColumn(
-    "volatilite_tarifaire",
-    F.sqrt(
-        (F.pow(F.coalesce(F.col("pct_majoration_2024_2025"), F.lit(0)) -
-               F.col("score_pression_tarifaire"), 2) +
-         F.pow(F.coalesce(F.col("pct_majoration_2023_2024"), F.lit(0)) -
-               F.col("score_pression_tarifaire"), 2) +
-         F.pow(F.coalesce(F.col("pct_majoration_2022_2023"), F.lit(0)) -
-               F.col("score_pression_tarifaire"), 2)) / 3
-    )
-)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. CLUSTERING (PySpark ML)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Variables pour le clustering
-feature_cols = [
-    "prime_proposee",
-    "bonus_malus",
-    "cumul_majoration_totale_pct",
-    "nb_annees_hausse_consecutive",
-    "score_pression_tarifaire",
-    "franchissement_centaine",
-    "ecart_premiere_derniere_pct",
-    "anciennete_portefeuille",
-    "volatilite_tarifaire",
-    "age_conducteur",
-    "nb_sinistres"
-]
-
-# Remplacer les nulls par 0 pour le clustering
-for col_name in feature_cols:
-    df = df.withColumn(col_name, F.coalesce(F.col(col_name), F.lit(0)))
-
-# Pipeline ML
-assembler = VectorAssembler(inputCols=feature_cols, outputCol="features_raw")
-scaler = StandardScaler(inputCol="features_raw", outputCol="features", withMean=True, withStd=True)
-kmeans = KMeans(featuresCol="features", predictionCol="cluster", k=4, seed=42, maxIter=50)
-
-pipeline = Pipeline(stages=[assembler, scaler, kmeans])
-model = pipeline.fit(df)
-df_clustered = model.transform(df)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. ANALYSE DES CLUSTERS
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Profil moyen par cluster
-cluster_profile = df_clustered.groupBy("cluster").agg(
-    F.count("*").alias("nb_clients"),
-    F.round(F.avg("prime_proposee"), 2).alias("prime_moy"),
-    F.round(F.avg("cumul_majoration_totale_pct"), 2).alias("cumul_majo_pct_moy"),
-    F.round(F.avg("nb_annees_hausse_consecutive"), 2).alias("nb_hausse_consec_moy"),
-    F.round(F.avg("score_pression_tarifaire"), 2).alias("pression_tarif_moy"),
-    F.round(F.avg("franchissement_centaine"), 2).alias("taux_franchissement"),
-    F.round(F.avg("ecart_premiere_derniere_pct"), 2).alias("ecart_1ere_derniere_moy"),
-    F.round(F.avg("anciennete_portefeuille"), 2).alias("anciennete_moy"),
-    F.round(F.avg("bonus_malus"), 2).alias("bm_moyen"),
-    F.round(F.avg("age_conducteur"), 2).alias("age_moyen"),
-    F.round(F.avg("nb_sinistres"), 2).alias("sinistres_moy"),
-)
-
-############################
-
-"""
-=============================================================================
-SIMULATION PANDAS - ANALYSE RÉSILIATIONS AUTO AVEC DONNÉES DE TEST
-=============================================================================
-"""
-import numpy as np
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
+import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from matplotlib.patches import FancyBboxPatch
-import seaborn as sns
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
-from sklearn.metrics import silhouette_score, silhouette_samples
-import warnings
-warnings.filterwarnings('ignore')
+import matplotlib.ticker as mticker
 
-np.random.seed(42)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. GÉNÉRATION DES DONNÉES DE TEST
-# ─────────────────────────────────────────────────────────────────────────────
-
-N = 2000  # résiliés 2025
-
-# Identifiants
-ids = [f"CLI_{i:05d}" for i in range(N)]
-
-# Profils clients
-age_conducteur = np.random.choice(
-    [np.random.randint(18, 30), np.random.randint(30, 55), np.random.randint(55, 80)],
-    size=N, p=[0.25, 0.50, 0.25]
-)
-anciennete_permis = np.clip(age_conducteur - 18 + np.random.randint(-2, 5, N), 0, 60)
-bonus_malus = np.random.choice(
-    [0.50, 0.56, 0.60, 0.64, 0.68, 0.72, 0.76, 0.80, 0.85, 0.90, 0.95, 1.00,
-     1.10, 1.25, 1.50, 1.75, 2.00, 2.50, 3.00, 3.50],
-    size=N, p=[0.12, 0.05, 0.06, 0.05, 0.05, 0.05, 0.04, 0.04, 0.04, 0.05,
-               0.05, 0.10, 0.07, 0.06, 0.05, 0.03, 0.03, 0.02, 0.02, 0.02]
-)
-nb_sinistres = np.random.choice([0, 1, 2, 3, 4], size=N, p=[0.45, 0.30, 0.15, 0.07, 0.03])
-zone_geo = np.random.choice(["A", "B", "C", "D", "E"], size=N, p=[0.15, 0.25, 0.30, 0.20, 0.10])
-type_vehicule = np.random.choice(
-    ["Citadine", "Berline", "SUV", "Utilitaire", "Sport"],
-    size=N, p=[0.30, 0.25, 0.20, 0.15, 0.10]
-)
-puissance_fiscale = np.random.choice(range(3, 16), size=N)
-mode_paiement = np.random.choice(["Mensuel", "Trimestriel", "Annuel"], size=N, p=[0.55, 0.25, 0.20])
-
-# ─── Primes historiques (logique réaliste) ───
-# Base prime liée au BM et à la zone
-base_prime = 280 + bonus_malus * 200 + puissance_fiscale * 12
-zone_coeff = {"A": 1.3, "B": 1.15, "C": 1.0, "D": 0.9, "E": 0.85}
-zone_mult = np.array([zone_coeff[z] for z in zone_geo])
-base_prime = base_prime * zone_mult
-
-# ~30% sont nouveaux clients (pas d'historique avant 2025)
-is_nouveau = np.random.choice([0, 1], size=N, p=[0.70, 0.30])
-
-# Générer primes historiques avec tendances de hausse variées
-prime_2022 = np.where(is_nouveau == 0,
-    np.round(base_prime * np.random.uniform(0.70, 0.90, N), 2),
-    np.nan)
-
-# ~15% perdus entre 2022 et 2023
-lost_2023 = (is_nouveau == 0) & (np.random.random(N) < 0.15)
-prime_2023 = np.where(
-    (is_nouveau == 0) & ~lost_2023,
-    np.where(~np.isnan(prime_2022),
-             np.round(prime_2022 * np.random.uniform(1.00, 1.12, N), 2),
-             np.round(base_prime * np.random.uniform(0.75, 0.92, N), 2)),
-    np.nan)
-
-lost_2024 = (is_nouveau == 0) & np.isnan(prime_2023) & (np.random.random(N) < 0.10)
-prime_2024 = np.where(
-    (is_nouveau == 0) & ~lost_2024,
-    np.where(~np.isnan(prime_2023),
-             np.round(prime_2023 * np.random.uniform(1.01, 1.15, N), 2),
-             np.where(~np.isnan(prime_2022),
-                       np.round(prime_2022 * np.random.uniform(1.05, 1.20, N), 2),
-                       np.nan)),
-    np.nan)
-
-# Prime 2025 (la dernière proposée avant résiliation)
-prime_2025 = np.where(
-    ~np.isnan(prime_2024),
-    np.round(prime_2024 * np.random.uniform(1.02, 1.20, N), 2),
-    np.round(base_prime * np.random.uniform(0.90, 1.15, N), 2)
-)
-
-# Prime avant (la prime avant renouvellement en 2025)
-prime_avant = np.where(~np.isnan(prime_2024), prime_2024, prime_2025 * np.random.uniform(0.85, 0.98, N))
-
-# ─── Construction du DataFrame 2025 ───
-df_2025 = pd.DataFrame({
-    "id_client": ids,
-    "prime_proposee": np.round(prime_2025, 2),
-    "prime_avant": np.round(prime_avant, 2),
-    "bonus_malus": bonus_malus,
-    "age_conducteur": age_conducteur,
-    "anciennete_permis": anciennete_permis,
-    "nb_sinistres": nb_sinistres,
-    "zone_geo": zone_geo,
-    "type_vehicule": type_vehicule,
-    "puissance_fiscale": puissance_fiscale,
-    "mode_paiement": mode_paiement,
+# ══════════════════════════════════════════════════════════════════════════════
+# 1. CONSTRUCTION DE LA BASE
+# ══════════════════════════════════════════════════════════════════════════════
+df = pd.DataFrame({
+    "anciennete": range(0, 26),
+    "ct_moyen": [
+        1.33, 1.30, 1.27, 1.25, 1.23, 1.21, 1.20, 1.19, 1.18, 1.17,
+        1.16, 1.15, 1.15, 1.14, 1.14, 1.13, 1.13, 1.12, 1.12, 1.11,
+        1.11, 1.10, 1.10, 1.09, 1.09, 1.08
+    ],
+    "prime_ht_portefeuille": [
+        120000, 310000, 480000, 620000, 540000, 510000, 470000, 430000,
+        400000, 370000, 350000, 320000, 290000, 260000, 240000, 220000,
+        195000, 170000, 150000, 130000, 110000, 90000, 75000, 60000,
+        45000, 30000
+    ],
+    "volume_contrats": [
+        850, 1420, 2100, 2650, 2300, 2180, 1950, 1800, 1680, 1550,
+        1420, 1300, 1180, 1050, 960, 870, 780, 690, 600, 510,
+        430, 350, 280, 210, 150, 100
+    ],
 })
 
-df_hist_2024 = pd.DataFrame({
-    "id_client": ids,
-    "prime_proposee_2024": prime_2024,
-    "bonus_malus_2024": np.where(~np.isnan(prime_2024), bonus_malus * np.random.uniform(0.90, 1.05, N), np.nan),
-})
-df_hist_2023 = pd.DataFrame({
-    "id_client": ids,
-    "prime_proposee_2023": prime_2023,
-    "bonus_malus_2023": np.where(~np.isnan(prime_2023), bonus_malus * np.random.uniform(0.85, 1.02, N), np.nan),
-})
-df_hist_2022 = pd.DataFrame({
-    "id_client": ids,
-    "prime_proposee_2022": prime_2022,
-    "bonus_malus_2022": np.where(~np.isnan(prime_2022), bonus_malus * np.random.uniform(0.80, 1.00, N), np.nan),
-})
+# ── Proportions ───────────────────────────────────────────────────────────────
+df["pct_volume"] = df["volume_contrats"] / df["volume_contrats"].sum() * 100
+df["pct_ca"] = df["prime_ht_portefeuille"] / df["prime_ht_portefeuille"].sum() * 100
 
-print(f"Base 2025 (résiliés): {len(df_2025)} lignes")
-print(f"Historique 2024 disponible: {df_hist_2024['prime_proposee_2024'].notna().sum()}")
-print(f"Historique 2023 disponible: {df_hist_2023['prime_proposee_2023'].notna().sum()}")
-print(f"Historique 2022 disponible: {df_hist_2022['prime_proposee_2022'].notna().sum()}")
+# ── Métriques de dispersion pondérées ─────────────────────────────────────────
+weights = df["volume_contrats"] / df["volume_contrats"].sum()
+ct_mean = np.average(df["ct_moyen"], weights=weights)
+ct_std = np.sqrt(np.average((df["ct_moyen"] - ct_mean) ** 2, weights=weights))
+ct_cv = ct_std / ct_mean
+ct_range = df["ct_moyen"].max() - df["ct_moyen"].min()
+band_up = ct_mean + ct_std
+band_lo = ct_mean - ct_std
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. JOINTURES (équivalent PySpark LEFT JOIN)
-# ─────────────────────────────────────────────────────────────────────────────
-df = df_2025.merge(df_hist_2024, on="id_client", how="left") \
-            .merge(df_hist_2023, on="id_client", how="left") \
-            .merge(df_hist_2022, on="id_client", how="left")
+print(df.to_string(index=False))
+print(f"\nMoyenne pondérée : {ct_mean:.4f}")
+print(f"Écart-type pondéré : {ct_std:.4f}")
+print(f"CV : {ct_cv:.2%}")
+print(f"Range : {ct_range:.2f}")
+print(f"Bande ±1σ : [{band_lo:.4f} ; {band_up:.4f}]")
 
-df["is_nouveau_client"] = (
-    df["prime_proposee_2024"].isna() &
-    df["prime_proposee_2023"].isna() &
-    df["prime_proposee_2022"].isna()
-).astype(int)
+# ══════════════════════════════════════════════════════════════════════════════
+# 2. PALETTE & STYLE
+# ══════════════════════════════════════════════════════════════════════════════
+NAVY       = "#0B2447"
+DEEP_BLUE  = "#153B6B"
+MID_BLUE   = "#1B6DA3"
+SKY_BLUE   = "#6EB4D9"
+PALE_BLUE  = "#A8D4EE"
+BG         = "#FAFCFE"
+TEXT       = "#1C2D3F"
+SUBTLE     = "#8FA3B8"
+BAND_FILL  = "#1B6DA3"
 
-print(f"\nNouveaux clients: {df['is_nouveau_client'].sum()} ({df['is_nouveau_client'].mean()*100:.1f}%)")
+x = df["anciennete"].values
+bw = 0.35
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. FEATURE ENGINEERING
-# ─────────────────────────────────────────────────────────────────────────────
-
-# --- 3A. MAJORATIONS ANNUELLES ---
-df["majoration_2022_2023"] = df["prime_proposee_2023"] - df["prime_proposee_2022"]
-df["majoration_2023_2024"] = df["prime_proposee_2024"] - df["prime_proposee_2023"]
-df["majoration_2024_2025"] = df["prime_proposee"] - df["prime_proposee_2024"]
-
-df["pct_majoration_2022_2023"] = (df["majoration_2022_2023"] / df["prime_proposee_2022"]) * 100
-df["pct_majoration_2023_2024"] = (df["majoration_2023_2024"] / df["prime_proposee_2023"]) * 100
-df["pct_majoration_2024_2025"] = (df["majoration_2024_2025"] / df["prime_proposee_2024"]) * 100
-
-# --- 3B. EFFET CUMUL ---
-df["nb_annees_hausse_consecutive"] = (
-    (df["majoration_2024_2025"].fillna(0) > 0).astype(int) +
-    (df["majoration_2023_2024"].fillna(0) > 0).astype(int) +
-    (df["majoration_2022_2023"].fillna(0) > 0).astype(int)
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. FIGURE
+# ══════════════════════════════════════════════════════════════════════════════
+fig, (ax1, ax2) = plt.subplots(
+    2, 1, figsize=(16, 11.5), facecolor=BG,
+    gridspec_kw={"height_ratios": [1, 1], "hspace": 0.30}
 )
 
-df["premiere_prime_connue"] = df[["prime_proposee_2022", "prime_proposee_2023",
-                                   "prime_proposee_2024", "prime_proposee"]].bfill(axis=1).iloc[:, 0]
+# ──────────────────────────────────────────────────────────────────────────────
+# GRAPHE 1 : Barres proportions + Courbe CT + Ligne CT = 1
+# ──────────────────────────────────────────────────────────────────────────────
+ax1.set_facecolor(BG)
 
-df["cumul_majoration_totale_euros"] = df["prime_proposee"] - df["premiere_prime_connue"]
-df["cumul_majoration_totale_pct"] = np.where(
-    df["premiere_prime_connue"] > 0,
-    (df["prime_proposee"] - df["premiere_prime_connue"]) / df["premiere_prime_connue"] * 100,
-    0
+ax1.bar(x - bw/2, df["pct_volume"], bw,
+        color=PALE_BLUE, edgecolor="white", linewidth=0.5,
+        label="% Volume Contrats", zorder=2)
+ax1.bar(x + bw/2, df["pct_ca"], bw,
+        color=MID_BLUE, edgecolor="white", linewidth=0.5,
+        label="% CA Prime HT", zorder=2)
+
+ax1.set_xlabel("Ancienneté (années)", fontsize=11, color=TEXT, labelpad=8)
+ax1.set_ylabel("Proportion (%)", fontsize=11, color=TEXT, labelpad=8)
+ax1.set_xticks(x)
+ax1.set_xticklabels(x, fontsize=9, color=TEXT)
+ax1.tick_params(axis="y", labelsize=9, colors=TEXT)
+ax1.set_xlim(-0.8, 25.8)
+ax1.set_axisbelow(True)
+
+# Axe droit : CT
+ax1r = ax1.twinx()
+ax1r.plot(x, df["ct_moyen"], color=NAVY, linewidth=2.5,
+          marker="o", markersize=4.5, markerfacecolor="white",
+          markeredgecolor=NAVY, markeredgewidth=1.5,
+          label="CT Moyen", zorder=5)
+
+# Ligne CT = 1
+ax1r.axhline(y=1.0, color=SKY_BLUE, linewidth=2, linestyle="--", zorder=4,
+             label="CT = 1 (équilibre)")
+
+ax1r.set_ylabel("CT Moyen", fontsize=11, color=TEXT, labelpad=8)
+ax1r.set_ylim(0.5, 2.0)
+ax1r.tick_params(axis="y", labelsize=9, colors=TEXT)
+ax1r.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+
+# Annotation CT = 1
+ax1r.text(25.5, 1.02, "CT = 1", fontsize=9, color=SKY_BLUE,
+          fontweight="bold", ha="right", va="bottom")
+
+h1, l1 = ax1.get_legend_handles_labels()
+h2, l2 = ax1r.get_legend_handles_labels()
+ax1.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=9.5,
+           frameon=True, fancybox=True, edgecolor="#D6E2ED",
+           facecolor="white", framealpha=0.95)
+
+ax1.set_title("Structure du portefeuille & Coefficient Tarifaire par ancienneté",
+              fontsize=13, fontweight="bold", color=NAVY, pad=14)
+
+# KPI box
+kpi_text = (
+    f"Total contrats : {df['volume_contrats'].sum():>10,}\n"
+    f"Total prime HT : {df['prime_ht_portefeuille'].sum():>10,} €\n"
+    f"CT moyen pond. : {ct_mean:>10.4f}"
+).replace(",", " ")
+ax1.text(0.01, 0.97, kpi_text, transform=ax1.transAxes,
+         fontsize=9.5, va="top", color=TEXT, family="monospace",
+         linespacing=1.6,
+         bbox=dict(boxstyle="round,pad=0.6", facecolor="white",
+                   edgecolor="#D6E2ED", alpha=0.95))
+
+# Supprimer grilles et bordures
+ax1.grid(False)
+ax1r.grid(False)
+for sp in list(ax1.spines.values()) + list(ax1r.spines.values()):
+    sp.set_visible(False)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# GRAPHE 2 : CT Moyen + bande ± 1σ pondéré
+# ──────────────────────────────────────────────────────────────────────────────
+ax2.set_facecolor(BG)
+
+# Bande σ
+ax2.fill_between(x, band_lo, band_up,
+                 color=BAND_FILL, alpha=0.10, zorder=1,
+                 label=f"± 1σ pondéré ({ct_std:.4f})")
+
+ax2.axhline(ct_mean, color=MID_BLUE, linewidth=1.8, linestyle="--", zorder=3,
+            label=f"Moyenne pondérée ({ct_mean:.3f})")
+ax2.axhline(band_up, color=BAND_FILL, linewidth=0.7, linestyle=":", alpha=0.5, zorder=2)
+ax2.axhline(band_lo, color=BAND_FILL, linewidth=0.7, linestyle=":", alpha=0.5, zorder=2)
+
+# Ligne CT = 1
+ax2.axhline(1.0, color=SKY_BLUE, linewidth=2, linestyle="--", zorder=2,
+            label="CT = 1 (équilibre)")
+ax2.text(25.5, 1.02, "CT = 1", fontsize=9, color=SKY_BLUE,
+         fontweight="bold", ha="right", va="bottom")
+
+# Courbe
+ax2.plot(x, df["ct_moyen"], color=NAVY, linewidth=2.5,
+         marker="o", markersize=5.5, markerfacecolor="white",
+         markeredgecolor=NAVY, markeredgewidth=1.8, zorder=5)
+
+# Points hors bande en orange
+WARN = "#D4760A"
+for i, ct in enumerate(df["ct_moyen"]):
+    if ct > band_up or ct < band_lo:
+        ax2.plot(x[i], ct, "o", markersize=8, markerfacecolor=WARN,
+                 markeredgecolor="white", markeredgewidth=1.5, zorder=6)
+        ax2.annotate(f"{ct:.2f}", (x[i], ct), textcoords="offset points",
+                     xytext=(0, 14), ha="center", fontsize=8.5,
+                     fontweight="bold", color=WARN,
+                     arrowprops=dict(arrowstyle="-", color=WARN, lw=0.8))
+
+ax2.set_xlabel("Ancienneté (années)", fontsize=11, color=TEXT, labelpad=8)
+ax2.set_ylabel("CT Moyen", fontsize=11, color=TEXT, labelpad=8)
+ax2.set_xticks(x)
+ax2.set_xticklabels(x, fontsize=9, color=TEXT)
+ax2.tick_params(axis="y", labelsize=9, colors=TEXT)
+ax2.set_xlim(-0.8, 25.8)
+ax2.set_ylim(0.5, 2.0)
+ax2.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
+ax2.set_axisbelow(True)
+
+# Légende
+orange_dot = plt.Line2D([0], [0], marker="o", color="w",
+                         markerfacecolor=WARN, markeredgecolor="white",
+                         markersize=8, label="Hors bande ± 1σ")
+hb, lb = ax2.get_legend_handles_labels()
+ax2.legend(handles=hb + [orange_dot], loc="upper right", fontsize=9.5,
+           frameon=True, fancybox=True, edgecolor="#D6E2ED",
+           facecolor="white", framealpha=0.95)
+
+ax2.set_title("Dispersion du CT Moyen — Bande ± 1σ pondéré par volume",
+              fontsize=13, fontweight="bold", color=NAVY, pad=14)
+
+# Encadré métriques
+metrics = (
+    f"  Moyenne pondérée   :  {ct_mean:.4f}\n"
+    f"  Écart-type pond.   :  {ct_std:.4f}\n"
+    f"  Coeff. variation   :  {ct_cv:.2%}\n"
+    f"  Range (max-min)    :  {ct_range:.2f}  [{df['ct_moyen'].min():.2f} → {df['ct_moyen'].max():.2f}]\n"
+    f"  Bande ± 1σ         :  [{band_lo:.4f} ; {band_up:.4f}]"
 )
+ax2.text(0.01, 0.55, metrics, transform=ax2.transAxes,
+         fontsize=9.5, va="top", color=TEXT, family="monospace",
+         linespacing=1.7,
+         bbox=dict(boxstyle="round,pad=0.7", facecolor="white",
+                   edgecolor="#D6E2ED", alpha=0.95))
 
-# Accélération de la hausse
-df["acceleration_hausse"] = np.where(
-    (df["majoration_2023_2024"].notna()) & (df["majoration_2023_2024"].abs() > 0),
-    df["majoration_2024_2025"] / df["majoration_2023_2024"].abs(),
-    np.nan
-)
+# Supprimer grilles et bordures
+ax2.grid(False)
+for sp in ax2.spines.values():
+    sp.set_visible(False)
 
-# Score de pression tarifaire (pondéré par récence)
-df["score_pression_tarifaire"] = (
-    df["pct_majoration_2024_2025"].fillna(0) * 3 +
-    df["pct_majoration_2023_2024"].fillna(0) * 2 +
-    df["pct_majoration_2022_2023"].fillna(0) * 1
-) / 6
+# ── Titre global + footnote ───────────────────────────────────────────────────
+fig.suptitle("Analyse du Portefeuille — Coefficient Tarifaire par Ancienneté",
+             fontsize=17, fontweight="bold", color=NAVY, y=0.99)
 
-# --- 3C. EFFET PSYCHOLOGIQUE - SEUILS CENTAINES ---
-df["centaine_prime_2025"] = (df["prime_proposee"] // 100) * 100
-df["centaine_prime_2024"] = np.where(
-    df["prime_proposee_2024"].notna(),
-    (df["prime_proposee_2024"] // 100) * 100,
-    np.nan
-)
+fig.text(0.5, 0.003,
+         "Données simulées · CT = Prime Portefeuille / Prime Affaires Nouvelles · σ pondéré par volume contrats",
+         ha="center", fontsize=8, color=SUBTLE, style="italic")
 
-df["franchissement_centaine"] = np.where(
-    df["centaine_prime_2024"].notna() & (df["centaine_prime_2025"] > df["centaine_prime_2024"]),
-    1, 0
-)
-
-nb_cent = np.where(
-    df["centaine_prime_2024"].notna(),
-    (df["centaine_prime_2025"] - df["centaine_prime_2024"]) / 100,
-    0
-)
-df["nb_centaines_franchies"] = np.nan_to_num(nb_cent, 0).astype(int)
-
-df["distance_prochaine_centaine"] = np.ceil(df["prime_proposee"] / 100) * 100 - df["prime_proposee"]
-
-df["juste_au_dessus_seuil"] = ((df["prime_proposee"] % 100 <= 15) & (df["prime_proposee"] % 100 > 0)).astype(int)
-
-# --- 3D. ÉCART PREMIÈRE PRIME / DERNIÈRE ---
-df["ecart_premiere_derniere_euros"] = df["prime_proposee"] - df["premiere_prime_connue"]
-df["ecart_premiere_derniere_pct"] = np.where(
-    df["premiere_prime_connue"] > 0,
-    (df["prime_proposee"] - df["premiere_prime_connue"]) / df["premiere_prime_connue"] * 100,
-    0
-)
-df["ratio_prime_actuelle_premiere"] = np.where(
-    df["premiere_prime_connue"] > 0,
-    df["prime_proposee"] / df["premiere_prime_connue"],
-    1
-)
-
-# --- 3E. VARIABLES ENRICHIES ---
-df["tranche_prime"] = pd.cut(df["prime_proposee"],
-    bins=[0, 300, 500, 700, 1000, 9999],
-    labels=["< 300€", "300-500€", "500-700€", "700-1000€", ">= 1000€"])
-
-df["anciennete_portefeuille"] = (
-    df["prime_proposee_2024"].notna().astype(int) +
-    df["prime_proposee_2023"].notna().astype(int) +
-    df["prime_proposee_2022"].notna().astype(int)
-)
-
-# Volatilité tarifaire
-mean_majo = df[["pct_majoration_2022_2023", "pct_majoration_2023_2024", "pct_majoration_2024_2025"]].mean(axis=1)
-df["volatilite_tarifaire"] = df[["pct_majoration_2022_2023", "pct_majoration_2023_2024",
-                                  "pct_majoration_2024_2025"]].std(axis=1).fillna(0)
-
-print("\n── Variables créées ──")
-print(f"Franchissement centaine: {df['franchissement_centaine'].sum()} clients ({df['franchissement_centaine'].mean()*100:.1f}%)")
-print(f"Juste au-dessus d'un seuil: {df['juste_au_dessus_seuil'].sum()} clients")
-print(f"Hausse 3 ans consécutifs: {(df['nb_annees_hausse_consecutive']==3).sum()} clients")
-print(f"Cumul majoration moyen: {df['cumul_majoration_totale_pct'].mean():.1f}%")
-print(f"Score pression tarifaire moyen: {df['score_pression_tarifaire'].mean():.2f}")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. CLUSTERING
-# ─────────────────────────────────────────────────────────────────────────────
-
-feature_cols = [
-    "prime_proposee", "bonus_malus", "cumul_majoration_totale_pct",
-    "nb_annees_hausse_consecutive", "score_pression_tarifaire",
-    "franchissement_centaine", "ecart_premiere_derniere_pct",
-    "anciennete_portefeuille", "volatilite_tarifaire",
-    "age_conducteur", "nb_sinistres"
-]
-
-X = df[feature_cols].fillna(0).copy()
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-
-# Méthode du coude pour k optimal
-inertias = []
-sil_scores = []
-K_range = range(2, 9)
-for k in K_range:
-    km = KMeans(n_clusters=k, random_state=42, n_init=10, max_iter=300)
-    labels = km.fit_predict(X_scaled)
-    inertias.append(km.inertia_)
-    sil_scores.append(silhouette_score(X_scaled, labels))
-
-# Choix k=4 (ajustable)
-K_OPTIMAL = 4
-kmeans_final = KMeans(n_clusters=K_OPTIMAL, random_state=42, n_init=20, max_iter=500)
-df["cluster"] = kmeans_final.fit_predict(X_scaled)
-
-# PCA pour visualisation
-pca = PCA(n_components=2)
-X_pca = pca.fit_transform(X_scaled)
-df["pca_1"] = X_pca[:, 0]
-df["pca_2"] = X_pca[:, 1]
-
-print(f"\n── Clustering K={K_OPTIMAL} ──")
-print(f"Silhouette Score: {silhouette_score(X_scaled, df['cluster']):.3f}")
-print(f"Variance expliquée PCA: {pca.explained_variance_ratio_.sum()*100:.1f}%")
-
-# Profils des clusters
-cluster_profiles = df.groupby("cluster").agg(
-    nb_clients=("id_client", "count"),
-    prime_moy=("prime_proposee", "mean"),
-    bm_moyen=("bonus_malus", "mean"),
-    cumul_majo_pct=("cumul_majoration_totale_pct", "mean"),
-    hausse_consec=("nb_annees_hausse_consecutive", "mean"),
-    pression_tarif=("score_pression_tarifaire", "mean"),
-    taux_franchissement=("franchissement_centaine", "mean"),
-    ecart_1ere_derniere=("ecart_premiere_derniere_pct", "mean"),
-    anciennete=("anciennete_portefeuille", "mean"),
-    age_moyen=("age_conducteur", "mean"),
-    sinistres_moy=("nb_sinistres", "mean"),
-    taux_nouveau=("is_nouveau_client", "mean"),
-    volatilite_moy=("volatilite_tarifaire", "mean"),
-).round(2)
-
-# Nommer les clusters
-cluster_names = {}
-used_names = set()
-for c in range(K_OPTIMAL):
-    row = cluster_profiles.loc[c]
-    if row["taux_nouveau"] > 0.5 and "Nouveaux Clients" not in used_names:
-        name = "Nouveaux Clients"
-    elif row["bm_moyen"] > 1.2 and "Hauts Risques / Malussés" not in used_names:
-        name = "Hauts Risques / Malussés"
-    elif row["pression_tarif"] > cluster_profiles["pression_tarif"].median() and row["taux_franchissement"] > 0.3 and "Choc Tarifaire (seuil)" not in used_names:
-        name = "Choc Tarifaire (seuil)"
-    elif row["hausse_consec"] >= 2 and "Érosion Progressive" not in used_names:
-        name = "Érosion Progressive"
-    elif row["prime_moy"] < cluster_profiles["prime_moy"].median() and "Sensibles au Prix" not in used_names:
-        name = "Sensibles au Prix"
-    else:
-        candidates = ["Fidèles Déçus", "Surprimés Récurrents", "Profils Mixtes"]
-        name = next((n for n in candidates if n not in used_names), f"Segment {c}")
-    cluster_names[c] = name
-    used_names.add(name)
-
-df["cluster_nom"] = df["cluster"].map(cluster_names)
-cluster_profiles["nom_cluster"] = cluster_profiles.index.map(cluster_names)
-
-print("\n── Profils des Clusters ──")
-print(cluster_profiles.to_string())
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# 5. VISUALISATIONS
-# ═════════════════════════════════════════════════════════════════════════════
-
-# Palette cohérente
-COLORS = ["#2563EB", "#F59E0B", "#10B981", "#EF4444", "#8B5CF6", "#EC4899"]
-CLUSTER_COLORS = {n: COLORS[i] for i, n in enumerate(cluster_names.values())}
-sns.set_style("whitegrid")
-plt.rcParams.update({
-    "font.size": 10, "axes.titlesize": 13, "axes.labelsize": 11,
-    "figure.facecolor": "white", "axes.facecolor": "#FAFBFC",
-    "font.family": "sans-serif"
-})
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIGURE 1 : Méthode du coude + Silhouette
-# ─────────────────────────────────────────────────────────────────────────────
-fig1, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-ax1.plot(list(K_range), inertias, "o-", color=COLORS[0], linewidth=2, markersize=8)
-ax1.axvline(K_OPTIMAL, color=COLORS[3], linestyle="--", alpha=0.7, label=f"K choisi = {K_OPTIMAL}")
-ax1.set_xlabel("Nombre de clusters (K)")
-ax1.set_ylabel("Inertie")
-ax1.set_title("Méthode du Coude")
-ax1.legend()
-
-ax2.bar(list(K_range), sil_scores, color=[COLORS[3] if k == K_OPTIMAL else COLORS[0] for k in K_range], alpha=0.8)
-ax2.set_xlabel("Nombre de clusters (K)")
-ax2.set_ylabel("Silhouette Score")
-ax2.set_title("Score Silhouette par K")
-
-fig1.suptitle("Sélection du nombre optimal de clusters", fontsize=15, fontweight="bold", y=1.02)
-fig1.tight_layout()
-fig1.savefig("/home/claude/fig1_elbow_silhouette.png", dpi=150, bbox_inches="tight")
+plt.savefig("/mnt/user-data/outputs/analyse_ct_final.png", dpi=200, bbox_inches="tight")
 plt.close()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIGURE 2 : Carte PCA des clusters
-# ─────────────────────────────────────────────────────────────────────────────
-fig2, ax = plt.subplots(figsize=(12, 8))
-for cname, color in CLUSTER_COLORS.items():
-    mask = df["cluster_nom"] == cname
-    ax.scatter(df.loc[mask, "pca_1"], df.loc[mask, "pca_2"],
-               c=color, label=cname, alpha=0.5, s=20, edgecolors="white", linewidth=0.3)
-
-# Centroïdes
-centroids_pca = pca.transform(kmeans_final.cluster_centers_)
-for i, (cx, cy) in enumerate(centroids_pca):
-    name = cluster_names[i]
-    ax.scatter(cx, cy, c=CLUSTER_COLORS[name], s=250, marker="X", edgecolors="black", linewidth=1.5, zorder=10)
-
-ax.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
-ax.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
-ax.set_title("Segmentation des profils résiliés (projection PCA)", fontsize=14, fontweight="bold")
-ax.legend(title="Segments", fontsize=10, title_fontsize=11, loc="upper right")
-fig2.tight_layout()
-fig2.savefig("/home/claude/fig2_pca_clusters.png", dpi=150, bbox_inches="tight")
-plt.close()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIGURE 3 : Radar Chart des profils clusters
-# ─────────────────────────────────────────────────────────────────────────────
-radar_cols = ["prime_moy", "bm_moyen", "cumul_majo_pct", "pression_tarif",
-              "taux_franchissement", "anciennete", "sinistres_moy", "volatilite_moy"]
-radar_labels = ["Prime moy.", "Bonus-Malus", "Cumul Majo %", "Pression tarif.",
-                "Franchissement", "Ancienneté", "Sinistres", "Volatilité"]
-
-# Normaliser 0-1
-radar_data = cluster_profiles[radar_cols].copy()
-for col in radar_cols:
-    rng = radar_data[col].max() - radar_data[col].min()
-    if rng > 0:
-        radar_data[col] = (radar_data[col] - radar_data[col].min()) / rng
-    else:
-        radar_data[col] = 0.5
-
-angles = np.linspace(0, 2 * np.pi, len(radar_cols), endpoint=False).tolist()
-angles += angles[:1]
-
-fig3, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True))
-for idx, (c, row) in enumerate(radar_data.iterrows()):
-    values = row.values.tolist() + [row.values[0]]
-    name = cluster_names[c]
-    ax.plot(angles, values, "o-", linewidth=2, color=CLUSTER_COLORS[name], label=name, markersize=5)
-    ax.fill(angles, values, alpha=0.1, color=CLUSTER_COLORS[name])
-
-ax.set_xticks(angles[:-1])
-ax.set_xticklabels(radar_labels, fontsize=10)
-ax.set_title("Profil comparé des segments", fontsize=14, fontweight="bold", y=1.08)
-ax.legend(loc="upper right", bbox_to_anchor=(1.35, 1.1), fontsize=10)
-fig3.tight_layout()
-fig3.savefig("/home/claude/fig3_radar_clusters.png", dpi=150, bbox_inches="tight")
-plt.close()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIGURE 4 : Effet cumul des majorations dans le temps
-# ─────────────────────────────────────────────────────────────────────────────
-fig4, axes = plt.subplots(1, 3, figsize=(18, 5))
-
-# 4a : Distribution du nb d'années hausse consécutive par cluster
-for cname, color in CLUSTER_COLORS.items():
-    mask = df["cluster_nom"] == cname
-    vals = df.loc[mask, "nb_annees_hausse_consecutive"].value_counts(normalize=True).sort_index()
-    axes[0].bar(vals.index + list(CLUSTER_COLORS.keys()).index(cname) * 0.18,
-                vals.values, width=0.18, color=color, label=cname, alpha=0.85)
-axes[0].set_xlabel("Années consécutives de hausse")
-axes[0].set_ylabel("Proportion")
-axes[0].set_title("Effet cumul : Nb d'années de hausse")
-axes[0].legend(fontsize=8)
-axes[0].set_xticks([0, 1, 2, 3])
-
-# 4b : Score pression tarifaire par cluster
-bp = df.boxplot(column="score_pression_tarifaire", by="cluster_nom", ax=axes[1],
-                patch_artist=True, return_type="dict")
-axes[1].set_title("Pression tarifaire par segment")
-axes[1].set_xlabel("")
-axes[1].set_ylabel("Score de pression")
-plt.sca(axes[1])
-plt.xticks(rotation=20, ha="right", fontsize=9)
-fig4.suptitle("")
-
-# 4c : Évolution moyenne des primes par cluster
-evol_data = []
-for c in range(K_OPTIMAL):
-    mask = df["cluster"] == c
-    name = cluster_names[c]
-    for year, col in [(2022, "prime_proposee_2022"), (2023, "prime_proposee_2023"),
-                       (2024, "prime_proposee_2024"), (2025, "prime_proposee")]:
-        val = df.loc[mask, col].mean()
-        if not np.isnan(val):
-            evol_data.append({"cluster": name, "annee": year, "prime_moy": val})
-
-evol_df = pd.DataFrame(evol_data)
-for cname, color in CLUSTER_COLORS.items():
-    sub = evol_df[evol_df["cluster"] == cname]
-    if len(sub) > 0:
-        axes[2].plot(sub["annee"], sub["prime_moy"], "o-", color=color, label=cname, linewidth=2, markersize=7)
-axes[2].set_xlabel("Année")
-axes[2].set_ylabel("Prime moyenne (€)")
-axes[2].set_title("Trajectoire tarifaire par segment")
-axes[2].legend(fontsize=8)
-axes[2].set_xticks([2022, 2023, 2024, 2025])
-
-fig4.suptitle("Analyse de l'effet cumul des majorations", fontsize=15, fontweight="bold", y=1.03)
-fig4.tight_layout()
-fig4.savefig("/home/claude/fig4_effet_cumul.png", dpi=150, bbox_inches="tight")
-plt.close()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIGURE 5 : Effet psychologique des seuils de centaine
-# ─────────────────────────────────────────────────────────────────────────────
-fig5, axes = plt.subplots(1, 3, figsize=(18, 5))
-
-# 5a : Distribution des primes autour des centaines
-modulo = df["prime_proposee"] % 100
-axes[0].hist(modulo, bins=50, color=COLORS[0], alpha=0.7, edgecolor="white")
-for seuil in [0, 15]:
-    axes[0].axvline(seuil, color=COLORS[3], linestyle="--", alpha=0.7)
-axes[0].axvspan(0, 15, alpha=0.15, color=COLORS[3], label="Zone 'juste au-dessus'")
-axes[0].set_xlabel("Position dans la centaine (prime mod 100)")
-axes[0].set_ylabel("Nombre de résiliés")
-axes[0].set_title("Distribution autour des seuils 100€")
-axes[0].legend()
-
-# 5b : Taux de franchissement par cluster
-franch_rate = df.groupby("cluster_nom")["franchissement_centaine"].mean() * 100
-bars = axes[1].bar(range(len(franch_rate)), franch_rate.values,
-                    color=[CLUSTER_COLORS[n] for n in franch_rate.index], alpha=0.85)
-axes[1].set_xticks(range(len(franch_rate)))
-axes[1].set_xticklabels(franch_rate.index, rotation=20, ha="right", fontsize=9)
-axes[1].set_ylabel("% franchissement centaine")
-axes[1].set_title("Franchissement de seuil par segment")
-for bar, val in zip(bars, franch_rate.values):
-    axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
-                 f"{val:.1f}%", ha="center", fontsize=9, fontweight="bold")
-
-# 5c : Scatter majoration vs franchissement
-mask_hist = df["prime_proposee_2024"].notna()
-axes[2].scatter(
-    df.loc[mask_hist & (df["franchissement_centaine"]==0), "pct_majoration_2024_2025"],
-    df.loc[mask_hist & (df["franchissement_centaine"]==0), "prime_proposee"],
-    c=COLORS[0], alpha=0.3, s=15, label="Sans franchissement"
-)
-axes[2].scatter(
-    df.loc[mask_hist & (df["franchissement_centaine"]==1), "pct_majoration_2024_2025"],
-    df.loc[mask_hist & (df["franchissement_centaine"]==1), "prime_proposee"],
-    c=COLORS[3], alpha=0.5, s=25, label="Avec franchissement", marker="^"
-)
-axes[2].set_xlabel("% majoration 2024→2025")
-axes[2].set_ylabel("Prime proposée 2025 (€)")
-axes[2].set_title("Impact du franchissement de centaine")
-axes[2].legend()
-
-fig5.suptitle("Effet psychologique : seuils de centaines d'euros", fontsize=15, fontweight="bold", y=1.03)
-fig5.tight_layout()
-fig5.savefig("/home/claude/fig5_effet_psycho.png", dpi=150, bbox_inches="tight")
-plt.close()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIGURE 6 : Écart première prime / dernière proposée
-# ─────────────────────────────────────────────────────────────────────────────
-fig6, axes = plt.subplots(1, 3, figsize=(18, 5))
-
-# 6a : Distribution de l'écart en %
-mask_non_nouveau = df["is_nouveau_client"] == 0
-axes[0].hist(df.loc[mask_non_nouveau, "ecart_premiere_derniere_pct"].clip(-20, 80),
-             bins=50, color=COLORS[1], alpha=0.7, edgecolor="white")
-axes[0].axvline(0, color="black", linestyle="-", linewidth=1)
-med = df.loc[mask_non_nouveau, "ecart_premiere_derniere_pct"].median()
-axes[0].axvline(med, color=COLORS[3], linestyle="--", label=f"Médiane: {med:.1f}%")
-axes[0].set_xlabel("Écart 1ère prime → dernière proposée (%)")
-axes[0].set_ylabel("Nombre de résiliés")
-axes[0].set_title("Distribution de l'écart total")
-axes[0].legend()
-
-# 6b : Écart par cluster (violin)
-df_violin = df[mask_non_nouveau].copy()
-df_violin["ecart_clip"] = df_violin["ecart_premiere_derniere_pct"].clip(-20, 80)
-order = list(CLUSTER_COLORS.keys())
-existing = [o for o in order if o in df_violin["cluster_nom"].values]
-parts = axes[1].violinplot(
-    [df_violin.loc[df_violin["cluster_nom"]==n, "ecart_clip"].dropna().values for n in existing],
-    positions=range(len(existing)), showmeans=True, showmedians=True
-)
-axes[1].set_xticks(range(len(existing)))
-axes[1].set_xticklabels(existing, rotation=20, ha="right", fontsize=9)
-axes[1].set_ylabel("Écart total (%)")
-axes[1].set_title("Écart tarifaire total par segment")
-
-# 6c : Ratio prime actuelle / première
-df_ratio = df[mask_non_nouveau].copy()
-for cname, color in CLUSTER_COLORS.items():
-    mask = df_ratio["cluster_nom"] == cname
-    if mask.sum() > 0:
-        vals = df_ratio.loc[mask, "ratio_prime_actuelle_premiere"].clip(0.5, 2.5)
-        axes[2].hist(vals, bins=30, alpha=0.4, color=color, label=cname, density=True)
-axes[2].axvline(1.0, color="black", linestyle="-", linewidth=1, label="Ratio = 1 (stable)")
-axes[2].set_xlabel("Ratio prime actuelle / 1ère prime connue")
-axes[2].set_ylabel("Densité")
-axes[2].set_title("Ratio d'inflation tarifaire")
-axes[2].legend(fontsize=8)
-
-fig6.suptitle("Écart entre première prime connue et dernière proposée", fontsize=15, fontweight="bold", y=1.03)
-fig6.tight_layout()
-fig6.savefig("/home/claude/fig6_ecart_primes.png", dpi=150, bbox_inches="tight")
-plt.close()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIGURE 7 : Heatmap de corrélation des variables clés
-# ─────────────────────────────────────────────────────────────────────────────
-corr_cols = [
-    "prime_proposee", "bonus_malus", "cumul_majoration_totale_pct",
-    "nb_annees_hausse_consecutive", "score_pression_tarifaire",
-    "franchissement_centaine", "ecart_premiere_derniere_pct",
-    "volatilite_tarifaire", "age_conducteur", "nb_sinistres",
-    "anciennete_portefeuille"
-]
-corr_labels = [
-    "Prime proposée", "Bonus-Malus", "Cumul Majo %",
-    "Nb hausse consec.", "Pression tarif.", "Franchissement",
-    "Écart 1ère-dern. %", "Volatilité tarif.", "Âge conducteur",
-    "Nb sinistres", "Ancienneté"
-]
-
-fig7, ax = plt.subplots(figsize=(12, 10))
-corr_matrix = df[corr_cols].corr()
-mask_upper = np.triu(np.ones_like(corr_matrix, dtype=bool), k=1)
-sns.heatmap(corr_matrix, mask=mask_upper, annot=True, fmt=".2f", cmap="RdBu_r",
-            center=0, square=True, linewidths=0.5, ax=ax,
-            xticklabels=corr_labels, yticklabels=corr_labels,
-            vmin=-1, vmax=1, cbar_kws={"shrink": 0.8})
-ax.set_title("Corrélation entre variables tarifaires et profil", fontsize=14, fontweight="bold")
-plt.xticks(rotation=45, ha="right")
-fig7.tight_layout()
-fig7.savefig("/home/claude/fig7_correlation.png", dpi=150, bbox_inches="tight")
-plt.close()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIGURE 8 : Répartition & profil détaillé des clusters
-# ─────────────────────────────────────────────────────────────────────────────
-fig8, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-# 8a : Répartition des clusters (donut)
-sizes = df["cluster_nom"].value_counts()
-colors_pie = [CLUSTER_COLORS[n] for n in sizes.index]
-wedges, texts, autotexts = axes[0, 0].pie(
-    sizes.values, labels=sizes.index, autopct="%1.1f%%",
-    colors=colors_pie, startangle=90, pctdistance=0.8,
-    wedgeprops=dict(width=0.45, edgecolor="white", linewidth=2))
-axes[0, 0].set_title("Répartition des segments", fontsize=13, fontweight="bold")
-
-# 8b : Prime moyenne par cluster et tranche
-ct = pd.crosstab(df["cluster_nom"], df["tranche_prime"], normalize="index") * 100
-ct.plot(kind="bar", stacked=True, ax=axes[0, 1], colormap="YlOrRd", edgecolor="white")
-axes[0, 1].set_title("Tranches de prime par segment", fontsize=13, fontweight="bold")
-axes[0, 1].set_xlabel("")
-axes[0, 1].set_ylabel("% du segment")
-axes[0, 1].legend(title="Tranche", fontsize=8, title_fontsize=9)
-plt.sca(axes[0, 1])
-plt.xticks(rotation=20, ha="right")
-
-# 8c : Mode de paiement par cluster
-ct2 = pd.crosstab(df["cluster_nom"], df["mode_paiement"], normalize="index") * 100
-ct2.plot(kind="bar", stacked=True, ax=axes[1, 0], color=["#2563EB", "#F59E0B", "#10B981"], edgecolor="white")
-axes[1, 0].set_title("Mode de paiement par segment", fontsize=13, fontweight="bold")
-axes[1, 0].set_xlabel("")
-axes[1, 0].set_ylabel("% du segment")
-axes[1, 0].legend(title="Paiement", fontsize=8, title_fontsize=9)
-plt.sca(axes[1, 0])
-plt.xticks(rotation=20, ha="right")
-
-# 8d : Type véhicule par cluster
-ct3 = pd.crosstab(df["cluster_nom"], df["type_vehicule"], normalize="index") * 100
-ct3.plot(kind="bar", stacked=True, ax=axes[1, 1], colormap="Set2", edgecolor="white")
-axes[1, 1].set_title("Type de véhicule par segment", fontsize=13, fontweight="bold")
-axes[1, 1].set_xlabel("")
-axes[1, 1].set_ylabel("% du segment")
-axes[1, 1].legend(title="Véhicule", fontsize=8, title_fontsize=9)
-plt.sca(axes[1, 1])
-plt.xticks(rotation=20, ha="right")
-
-fig8.suptitle("Caractérisation détaillée des segments", fontsize=15, fontweight="bold", y=1.01)
-fig8.tight_layout()
-fig8.savefig("/home/claude/fig8_profils_clusters.png", dpi=150, bbox_inches="tight")
-plt.close()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIGURE 9 : Feature importance (distance aux centroïdes par feature)
-# ─────────────────────────────────────────────────────────────────────────────
-fig9, ax = plt.subplots(figsize=(12, 6))
-centroids = pd.DataFrame(kmeans_final.cluster_centers_, columns=feature_cols)
-# Dispersion inter-cluster par variable
-feat_importance = centroids.std()
-feat_importance = feat_importance.sort_values(ascending=True)
-
-bars = ax.barh(range(len(feat_importance)), feat_importance.values, color=COLORS[0], alpha=0.8)
-ax.set_yticks(range(len(feat_importance)))
-ax.set_yticklabels(feat_importance.index, fontsize=10)
-ax.set_xlabel("Dispersion inter-clusters (écart-type des centroïdes normalisés)")
-ax.set_title("Importance des variables dans la segmentation", fontsize=14, fontweight="bold")
-
-for bar, val in zip(bars, feat_importance.values):
-    ax.text(bar.get_width() + 0.02, bar.get_y() + bar.get_height()/2,
-            f"{val:.2f}", va="center", fontsize=9)
-
-fig9.tight_layout()
-fig9.savefig("/home/claude/fig9_feature_importance.png", dpi=150, bbox_inches="tight")
-plt.close()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIGURE 10 : Synthèse par segment - tableau visuel
-# ─────────────────────────────────────────────────────────────────────────────
-fig10, ax = plt.subplots(figsize=(16, 6))
-ax.axis("off")
-
-cols_display = ["nom_cluster", "nb_clients", "prime_moy", "bm_moyen", "cumul_majo_pct",
-                "hausse_consec", "pression_tarif", "taux_franchissement", "age_moyen", "sinistres_moy"]
-headers = ["Segment", "N", "Prime moy", "BM moy", "Cumul %", "Hausse consec.",
-           "Pression", "% Franchissement", "Âge moy", "Sinistres"]
-
-table_data = cluster_profiles[cols_display].values.tolist()
-# Format percentages
-for row in table_data:
-    row[7] = f"{row[7]*100:.1f}%"
-
-table = ax.table(cellText=table_data, colLabels=headers, loc="center", cellLoc="center")
-table.auto_set_font_size(False)
-table.set_fontsize(10)
-table.scale(1, 2)
-
-# Color header
-for j in range(len(headers)):
-    table[0, j].set_facecolor("#2563EB")
-    table[0, j].set_text_props(color="white", fontweight="bold")
-
-# Color rows by cluster
-for i in range(len(table_data)):
-    color = list(CLUSTER_COLORS.values())[i % len(CLUSTER_COLORS)]
-    table[i+1, 0].set_facecolor(color)
-    table[i+1, 0].set_text_props(color="white", fontweight="bold")
-
-ax.set_title("Tableau de synthèse des segments résiliés", fontsize=14, fontweight="bold", y=0.95)
-fig10.tight_layout()
-fig10.savefig("/home/claude/fig10_synthese.png", dpi=150, bbox_inches="tight")
-plt.close()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# EXPORT
-# ─────────────────────────────────────────────────────────────────────────────
-export_cols = [
-    "id_client", "prime_proposee", "prime_avant", "bonus_malus",
-    "age_conducteur", "type_vehicule", "zone_geo", "nb_sinistres", "mode_paiement",
-    "prime_proposee_2024", "prime_proposee_2023", "prime_proposee_2022",
-    "is_nouveau_client", "majoration_2024_2025", "majoration_2023_2024",
-    "pct_majoration_2024_2025", "pct_majoration_2023_2024",
-    "nb_annees_hausse_consecutive", "cumul_majoration_totale_pct",
-    "score_pression_tarifaire", "franchissement_centaine",
-    "juste_au_dessus_seuil", "ecart_premiere_derniere_pct",
-    "ratio_prime_actuelle_premiere", "volatilite_tarifaire",
-    "anciennete_portefeuille", "cluster", "cluster_nom"
-]
-df[export_cols].to_csv("/home/claude/resilies_2025_analyse.csv", index=False)
-
-print("\n✅ Toutes les figures et données exportées avec succès !")
-print(f"   - 10 figures PNG dans /home/claude/")
-print(f"   - CSV final: resilies_2025_analyse.csv ({len(df)} lignes, {len(export_cols)} colonnes)")
-
-cluster_profile.orderBy("cluster").show(truncate=False)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. EXPORT POUR VISUALISATION
-# ─────────────────────────────────────────────────────────────────────────────
-df_clustered.toPandas().to_csv("resilies_2025_clustered.csv", index=False)
-
-spark.stop()
+print("Graph saved OK")
