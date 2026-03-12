@@ -4,225 +4,264 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. CONSTRUCTION DE LA BASE
-# ══════════════════════════════════════════════════════════════════════════════
-df = pd.DataFrame({
-    "anciennete": range(0, 26),
-    "ct_moyen": [
-        1.33, 1.30, 1.27, 1.25, 1.23, 1.21, 1.20, 1.19, 1.18, 1.17,
-        1.16, 1.15, 1.15, 1.14, 1.14, 1.13, 1.13, 1.12, 1.12, 1.11,
-        1.11, 1.10, 1.10, 1.09, 1.09, 1.08
-    ],
-    "prime_ht_portefeuille": [
-        120000, 310000, 480000, 620000, 540000, 510000, 470000, 430000,
-        400000, 370000, 350000, 320000, 290000, 260000, 240000, 220000,
-        195000, 170000, 150000, 130000, 110000, 90000, 75000, 60000,
-        45000, 30000
-    ],
-    "volume_contrats": [
-        850, 1420, 2100, 2650, 2300, 2180, 1950, 1800, 1680, 1550,
-        1420, 1300, 1180, 1050, 960, 870, 780, 690, 600, 510,
-        430, 350, 280, 210, 150, 100
-    ],
-})
-
-# ── Proportions ───────────────────────────────────────────────────────────────
-df["pct_volume"] = df["volume_contrats"] / df["volume_contrats"].sum() * 100
-df["pct_ca"] = df["prime_ht_portefeuille"] / df["prime_ht_portefeuille"].sum() * 100
-
-# ── Métriques de dispersion pondérées ─────────────────────────────────────────
-weights = df["volume_contrats"] / df["volume_contrats"].sum()
-ct_mean = np.average(df["ct_moyen"], weights=weights)
-ct_std = np.sqrt(np.average((df["ct_moyen"] - ct_mean) ** 2, weights=weights))
-ct_cv = ct_std / ct_mean
-ct_range = df["ct_moyen"].max() - df["ct_moyen"].min()
-band_up = ct_mean + ct_std
-band_lo = ct_mean - ct_std
-
-print(df.to_string(index=False))
-print(f"\nMoyenne pondérée : {ct_mean:.4f}")
-print(f"Écart-type pondéré : {ct_std:.4f}")
-print(f"CV : {ct_cv:.2%}")
-print(f"Range : {ct_range:.2f}")
-print(f"Bande ±1σ : [{band_lo:.4f} ; {band_up:.4f}]")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 2. PALETTE & STYLE
+# PALETTE & STYLE COMMUN
 # ══════════════════════════════════════════════════════════════════════════════
 NAVY       = "#0B2447"
-DEEP_BLUE  = "#153B6B"
 MID_BLUE   = "#1B6DA3"
 SKY_BLUE   = "#6EB4D9"
 PALE_BLUE  = "#A8D4EE"
-BG         = "#FAFCFE"
+BG         = "#F7F5F0"
 TEXT       = "#1C2D3F"
 SUBTLE     = "#8FA3B8"
 BAND_FILL  = "#1B6DA3"
+WARN       = "#D4760A"
 
-x = df["anciennete"].values
-bw = 0.35
+
+def compute_metrics(df, col_ct, col_weight):
+    w = df[col_weight] / df[col_weight].sum()
+    mu = np.average(df[col_ct], weights=w)
+    sigma = np.sqrt(np.average((df[col_ct] - mu) ** 2, weights=w))
+    cv = sigma / mu
+    rng = df[col_ct].max() - df[col_ct].min()
+    return w, mu, sigma, cv, rng
+
+
+def plot_two_panels(df, x_col, ct_col, prime_col, vol_col,
+                    x_label, title_var, filename,
+                    ct_ylim=(0.5, 2.0), rotate_x=False):
+
+    df = df.copy()
+    df["pct_volume"] = df[vol_col] / df[vol_col].sum() * 100
+    df["pct_ca"] = df[prime_col] / df[prime_col].sum() * 100
+
+    weights, ct_mean, ct_std, ct_cv, ct_range = compute_metrics(df, ct_col, vol_col)
+    band_up = ct_mean + ct_std
+    band_lo = ct_mean - ct_std
+
+    x = np.arange(len(df))
+    x_labels = df[x_col].values
+    bw = 0.35
+    rot = 45 if rotate_x else 0
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(16, 11.5), facecolor=BG,
+        gridspec_kw={"height_ratios": [1, 1], "hspace": 0.30}
+    )
+
+    # ══════════════════════════════════════════════════════════════════════
+    # GRAPHE 1 : Barres + CT + ligne CT=1
+    # ══════════════════════════════════════════════════════════════════════
+    ax1.set_facecolor(BG)
+    ax1.bar(x - bw/2, df["pct_volume"], bw,
+            color=PALE_BLUE, edgecolor="white", linewidth=0.5,
+            label="% Volume Contrats", zorder=2)
+    ax1.bar(x + bw/2, df["pct_ca"], bw,
+            color=MID_BLUE, edgecolor="white", linewidth=0.5,
+            label="% CA Prime HT", zorder=2)
+
+    ax1.set_xlabel(x_label, fontsize=11, color=TEXT, labelpad=8)
+    ax1.set_ylabel("Proportion (%)", fontsize=11, color=TEXT, labelpad=8)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(x_labels, fontsize=8, color=TEXT, rotation=rot)
+    ax1.tick_params(axis="y", labelsize=9, colors=TEXT)
+    ax1.set_xlim(-0.8, len(x) - 0.2)
+
+    ax1r = ax1.twinx()
+    ax1r.plot(x, df[ct_col], color=NAVY, linewidth=2.5,
+              marker="o", markersize=4, markerfacecolor="white",
+              markeredgecolor=NAVY, markeredgewidth=1.5,
+              label="CT Moyen", zorder=5)
+    ax1r.axhline(y=1.0, color=SKY_BLUE, linewidth=2, linestyle="--",
+                 zorder=4, label="CT = 1 (équilibre)")
+    ax1r.text(len(x) - 0.5, 1.02, "CT = 1", fontsize=9, color=SKY_BLUE,
+              fontweight="bold", ha="right", va="bottom")
+    ax1r.set_ylabel("CT Moyen", fontsize=11, color=TEXT, labelpad=8)
+    ax1r.set_ylim(ct_ylim)
+    ax1r.tick_params(axis="y", labelsize=9, colors=TEXT)
+    ax1r.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
+
+    h1, l1 = ax1.get_legend_handles_labels()
+    h2, l2 = ax1r.get_legend_handles_labels()
+    ax1.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=9.5,
+               frameon=True, fancybox=True, edgecolor="#D6E2ED",
+               facecolor="white", framealpha=0.95)
+    ax1.set_title(f"Structure du portefeuille & CT Moyen par {title_var}",
+                  fontsize=13, fontweight="bold", color=NAVY, pad=14)
+
+    kpi_text = (
+        f"Total contrats : {df[vol_col].sum():>10,}\n"
+        f"Total prime HT : {df[prime_col].sum():>10,} €\n"
+        f"CT moyen pond. : {ct_mean:>10.4f}"
+    ).replace(",", " ")
+    ax1.text(0.01, 0.97, kpi_text, transform=ax1.transAxes,
+             fontsize=9.5, va="top", color=TEXT, family="monospace",
+             linespacing=1.6,
+             bbox=dict(boxstyle="round,pad=0.6", facecolor="white",
+                       edgecolor="#D6E2ED", alpha=0.95))
+
+    ax1.grid(False); ax1r.grid(False)
+    for sp in list(ax1.spines.values()) + list(ax1r.spines.values()):
+        sp.set_visible(False)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # GRAPHE 2 : Dispersion CT + bande ± 1σ
+    # ══════════════════════════════════════════════════════════════════════
+    ax2.set_facecolor(BG)
+    ax2.fill_between(x, band_lo, band_up,
+                     color=BAND_FILL, alpha=0.10, zorder=1,
+                     label=f"± 1σ pondéré ({ct_std:.4f})")
+    ax2.axhline(ct_mean, color=MID_BLUE, linewidth=1.8, linestyle="--",
+                zorder=3, label=f"Moyenne pondérée ({ct_mean:.3f})")
+    ax2.axhline(band_up, color=BAND_FILL, linewidth=0.7, linestyle=":",
+                alpha=0.5, zorder=2)
+    ax2.axhline(band_lo, color=BAND_FILL, linewidth=0.7, linestyle=":",
+                alpha=0.5, zorder=2)
+    ax2.axhline(1.0, color=SKY_BLUE, linewidth=2, linestyle="--",
+                zorder=2, label="CT = 1 (équilibre)")
+    ax2.text(len(x) - 0.5, 1.02, "CT = 1", fontsize=9, color=SKY_BLUE,
+             fontweight="bold", ha="right", va="bottom")
+
+    ax2.plot(x, df[ct_col], color=NAVY, linewidth=2.5,
+             marker="o", markersize=5.5, markerfacecolor="white",
+             markeredgecolor=NAVY, markeredgewidth=1.8, zorder=5)
+
+    for i, ct in enumerate(df[ct_col]):
+        if ct > band_up or ct < band_lo:
+            ax2.plot(x[i], ct, "o", markersize=8, markerfacecolor=WARN,
+                     markeredgecolor="white", markeredgewidth=1.5, zorder=6)
+            ax2.annotate(f"{ct:.2f}", (x[i], ct), textcoords="offset points",
+                         xytext=(0, 14), ha="center", fontsize=8.5,
+                         fontweight="bold", color=WARN,
+                         arrowprops=dict(arrowstyle="-", color=WARN, lw=0.8))
+
+    ax2.set_xlabel(x_label, fontsize=11, color=TEXT, labelpad=8)
+    ax2.set_ylabel("CT Moyen", fontsize=11, color=TEXT, labelpad=8)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(x_labels, fontsize=8, color=TEXT, rotation=rot)
+    ax2.tick_params(axis="y", labelsize=9, colors=TEXT)
+    ax2.set_xlim(-0.8, len(x) - 0.2)
+    ax2.set_ylim(ct_ylim)
+    ax2.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
+
+    orange_dot = plt.Line2D([0], [0], marker="o", color="w",
+                             markerfacecolor=WARN, markeredgecolor="white",
+                             markersize=8, label="Hors bande ± 1σ")
+    hb, lb = ax2.get_legend_handles_labels()
+    ax2.legend(handles=hb + [orange_dot], loc="upper right", fontsize=9.5,
+               frameon=True, fancybox=True, edgecolor="#D6E2ED",
+               facecolor="white", framealpha=0.95)
+    ax2.set_title(f"Dispersion du CT Moyen par {title_var} — Bande ± 1σ pondéré",
+                  fontsize=13, fontweight="bold", color=NAVY, pad=14)
+
+    metrics = (
+        f"  Moyenne pondérée   :  {ct_mean:.4f}\n"
+        f"  Écart-type pond.   :  {ct_std:.4f}\n"
+        f"  Coeff. variation   :  {ct_cv:.2%}\n"
+        f"  Range (max-min)    :  {ct_range:.2f}  [{df[ct_col].min():.2f} → {df[ct_col].max():.2f}]\n"
+        f"  Bande ± 1σ         :  [{band_lo:.4f} ; {band_up:.4f}]"
+    )
+    ax2.text(0.01, 0.55, metrics, transform=ax2.transAxes,
+             fontsize=9.5, va="top", color=TEXT, family="monospace",
+             linespacing=1.7,
+             bbox=dict(boxstyle="round,pad=0.7", facecolor="white",
+                       edgecolor="#D6E2ED", alpha=0.95))
+
+    ax2.grid(False)
+    for sp in ax2.spines.values():
+        sp.set_visible(False)
+
+    fig.suptitle(f"Analyse du Portefeuille — CT par {title_var}",
+                 fontsize=17, fontweight="bold", color=NAVY, y=0.99)
+    fig.text(0.5, 0.003,
+             "Données simulées · CT = Prime Ptf / Prime AN · σ pondéré par volume contrats",
+             ha="center", fontsize=8, color=SUBTLE, style="italic")
+
+    plt.savefig(f"/mnt/user-data/outputs/{filename}", dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"  OK  {filename}")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. FIGURE
+# BASE 1 : ANCIENNETÉ (0 → 25 ans)
 # ══════════════════════════════════════════════════════════════════════════════
-fig, (ax1, ax2) = plt.subplots(
-    2, 1, figsize=(16, 11.5), facecolor=BG,
-    gridspec_kw={"height_ratios": [1, 1], "hspace": 0.30}
-)
+print("1/3 Ancienneté...")
+np.random.seed(42)
+anc = np.arange(0, 26)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# GRAPHE 1 : Barres proportions + Courbe CT + Ligne CT = 1
-# ──────────────────────────────────────────────────────────────────────────────
-ax1.set_facecolor(BG)
+df_anc = pd.DataFrame({
+    "anciennete": anc,
+    "ct_moyen": np.round(np.clip(
+        1.33 - 0.010 * anc + np.random.normal(0, 0.008, len(anc)), 1.08, 1.33), 2),
+    "prime_ht": np.array([
+        120, 310, 480, 620, 540, 510, 470, 430, 400, 370,
+        350, 320, 290, 260, 240, 220, 195, 170, 150, 130,
+        110, 90, 75, 60, 45, 30]) * 1000,
+    "volume": [
+        850, 1420, 2100, 2650, 2300, 2180, 1950, 1800, 1680, 1550,
+        1420, 1300, 1180, 1050, 960, 870, 780, 690, 600, 510,
+        430, 350, 280, 210, 150, 100],
+})
 
-ax1.bar(x - bw/2, df["pct_volume"], bw,
-        color=PALE_BLUE, edgecolor="white", linewidth=0.5,
-        label="% Volume Contrats", zorder=2)
-ax1.bar(x + bw/2, df["pct_ca"], bw,
-        color=MID_BLUE, edgecolor="white", linewidth=0.5,
-        label="% CA Prime HT", zorder=2)
+plot_two_panels(df_anc, "anciennete", "ct_moyen", "prime_ht", "volume",
+                "Ancienneté (années)", "Ancienneté", "ct_anciennete.png")
 
-ax1.set_xlabel("Ancienneté (années)", fontsize=11, color=TEXT, labelpad=8)
-ax1.set_ylabel("Proportion (%)", fontsize=11, color=TEXT, labelpad=8)
-ax1.set_xticks(x)
-ax1.set_xticklabels(x, fontsize=9, color=TEXT)
-ax1.tick_params(axis="y", labelsize=9, colors=TEXT)
-ax1.set_xlim(-0.8, 25.8)
-ax1.set_axisbelow(True)
+# ══════════════════════════════════════════════════════════════════════════════
+# BASE 2 : MAJORATION (-7% → +30%)
+# ══════════════════════════════════════════════════════════════════════════════
+print("2/3 Majoration...")
+np.random.seed(43)
+maj = np.arange(-7, 31)
+n = len(maj)
 
-# Axe droit : CT
-ax1r = ax1.twinx()
-ax1r.plot(x, df["ct_moyen"], color=NAVY, linewidth=2.5,
-          marker="o", markersize=4.5, markerfacecolor="white",
-          markeredgecolor=NAVY, markeredgewidth=1.5,
-          label="CT Moyen", zorder=5)
+ct_maj = np.round(np.clip(
+    1.08 + (maj - maj.min()) / (maj.max() - maj.min()) * 0.25
+    + np.random.normal(0, 0.012, n), 1.08, 1.33), 2)
 
-# Ligne CT = 1
-ax1r.axhline(y=1.0, color=SKY_BLUE, linewidth=2, linestyle="--", zorder=4,
-             label="CT = 1 (équilibre)")
+vol_maj = np.clip(
+    2500 * np.exp(-0.5 * ((maj - 5) / 8)**2)
+    + np.random.normal(0, 50, n), 80, 3000).astype(int)
 
-ax1r.set_ylabel("CT Moyen", fontsize=11, color=TEXT, labelpad=8)
-ax1r.set_ylim(0.5, 2.0)
-ax1r.tick_params(axis="y", labelsize=9, colors=TEXT)
-ax1r.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+prime_maj = (vol_maj * np.random.uniform(180, 250, n)).astype(int)
 
-# Annotation CT = 1
-ax1r.text(25.5, 1.02, "CT = 1", fontsize=9, color=SKY_BLUE,
-          fontweight="bold", ha="right", va="bottom")
+df_maj = pd.DataFrame({
+    "majoration": maj,
+    "ct_moyen": ct_maj,
+    "prime_ht": prime_maj,
+    "volume": vol_maj,
+})
 
-h1, l1 = ax1.get_legend_handles_labels()
-h2, l2 = ax1r.get_legend_handles_labels()
-ax1.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=9.5,
-           frameon=True, fancybox=True, edgecolor="#D6E2ED",
-           facecolor="white", framealpha=0.95)
+plot_two_panels(df_maj, "majoration", "ct_moyen", "prime_ht", "volume",
+                "Majoration (%)", "Majoration", "ct_majoration.png",
+                rotate_x=True)
 
-ax1.set_title("Structure du portefeuille & Coefficient Tarifaire par ancienneté",
-              fontsize=13, fontweight="bold", color=NAVY, pad=14)
+# ══════════════════════════════════════════════════════════════════════════════
+# BASE 3 : ÂGE VÉHICULE (80 → 130 mois)
+# ══════════════════════════════════════════════════════════════════════════════
+print("3/3 Âge...")
+np.random.seed(44)
+age = np.arange(80, 131)
+n_a = len(age)
 
-# KPI box
-kpi_text = (
-    f"Total contrats : {df['volume_contrats'].sum():>10,}\n"
-    f"Total prime HT : {df['prime_ht_portefeuille'].sum():>10,} €\n"
-    f"CT moyen pond. : {ct_mean:>10.4f}"
-).replace(",", " ")
-ax1.text(0.01, 0.97, kpi_text, transform=ax1.transAxes,
-         fontsize=9.5, va="top", color=TEXT, family="monospace",
-         linespacing=1.6,
-         bbox=dict(boxstyle="round,pad=0.6", facecolor="white",
-                   edgecolor="#D6E2ED", alpha=0.95))
+# CT en U : bas vers 100-105, plus haut aux extrêmes
+ct_age = np.round(np.clip(
+    1.12 + 0.20 * ((age - 102) / 25)**2
+    + np.random.normal(0, 0.015, n_a), 1.08, 1.33), 2)
 
-# Supprimer grilles et bordures
-ax1.grid(False)
-ax1r.grid(False)
-for sp in list(ax1.spines.values()) + list(ax1r.spines.values()):
-    sp.set_visible(False)
+vol_age = np.clip(
+    2200 * np.exp(-0.5 * ((age - 100) / 12)**2)
+    + np.random.normal(0, 40, n_a), 50, 2500).astype(int)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# GRAPHE 2 : CT Moyen + bande ± 1σ pondéré
-# ──────────────────────────────────────────────────────────────────────────────
-ax2.set_facecolor(BG)
+prime_age = (vol_age * np.random.uniform(200, 280, n_a)).astype(int)
 
-# Bande σ
-ax2.fill_between(x, band_lo, band_up,
-                 color=BAND_FILL, alpha=0.10, zorder=1,
-                 label=f"± 1σ pondéré ({ct_std:.4f})")
+df_age = pd.DataFrame({
+    "age": age,
+    "ct_moyen": ct_age,
+    "prime_ht": prime_age,
+    "volume": vol_age,
+})
 
-ax2.axhline(ct_mean, color=MID_BLUE, linewidth=1.8, linestyle="--", zorder=3,
-            label=f"Moyenne pondérée ({ct_mean:.3f})")
-ax2.axhline(band_up, color=BAND_FILL, linewidth=0.7, linestyle=":", alpha=0.5, zorder=2)
-ax2.axhline(band_lo, color=BAND_FILL, linewidth=0.7, linestyle=":", alpha=0.5, zorder=2)
+plot_two_panels(df_age, "age", "ct_moyen", "prime_ht", "volume",
+                "Âge du véhicule (mois)", "Âge", "ct_age.png",
+                rotate_x=True)
 
-# Ligne CT = 1
-ax2.axhline(1.0, color=SKY_BLUE, linewidth=2, linestyle="--", zorder=2,
-            label="CT = 1 (équilibre)")
-ax2.text(25.5, 1.02, "CT = 1", fontsize=9, color=SKY_BLUE,
-         fontweight="bold", ha="right", va="bottom")
-
-# Courbe
-ax2.plot(x, df["ct_moyen"], color=NAVY, linewidth=2.5,
-         marker="o", markersize=5.5, markerfacecolor="white",
-         markeredgecolor=NAVY, markeredgewidth=1.8, zorder=5)
-
-# Points hors bande en orange
-WARN = "#D4760A"
-for i, ct in enumerate(df["ct_moyen"]):
-    if ct > band_up or ct < band_lo:
-        ax2.plot(x[i], ct, "o", markersize=8, markerfacecolor=WARN,
-                 markeredgecolor="white", markeredgewidth=1.5, zorder=6)
-        ax2.annotate(f"{ct:.2f}", (x[i], ct), textcoords="offset points",
-                     xytext=(0, 14), ha="center", fontsize=8.5,
-                     fontweight="bold", color=WARN,
-                     arrowprops=dict(arrowstyle="-", color=WARN, lw=0.8))
-
-ax2.set_xlabel("Ancienneté (années)", fontsize=11, color=TEXT, labelpad=8)
-ax2.set_ylabel("CT Moyen", fontsize=11, color=TEXT, labelpad=8)
-ax2.set_xticks(x)
-ax2.set_xticklabels(x, fontsize=9, color=TEXT)
-ax2.tick_params(axis="y", labelsize=9, colors=TEXT)
-ax2.set_xlim(-0.8, 25.8)
-ax2.set_ylim(0.5, 2.0)
-ax2.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
-ax2.set_axisbelow(True)
-
-# Légende
-orange_dot = plt.Line2D([0], [0], marker="o", color="w",
-                         markerfacecolor=WARN, markeredgecolor="white",
-                         markersize=8, label="Hors bande ± 1σ")
-hb, lb = ax2.get_legend_handles_labels()
-ax2.legend(handles=hb + [orange_dot], loc="upper right", fontsize=9.5,
-           frameon=True, fancybox=True, edgecolor="#D6E2ED",
-           facecolor="white", framealpha=0.95)
-
-ax2.set_title("Dispersion du CT Moyen — Bande ± 1σ pondéré par volume",
-              fontsize=13, fontweight="bold", color=NAVY, pad=14)
-
-# Encadré métriques
-metrics = (
-    f"  Moyenne pondérée   :  {ct_mean:.4f}\n"
-    f"  Écart-type pond.   :  {ct_std:.4f}\n"
-    f"  Coeff. variation   :  {ct_cv:.2%}\n"
-    f"  Range (max-min)    :  {ct_range:.2f}  [{df['ct_moyen'].min():.2f} → {df['ct_moyen'].max():.2f}]\n"
-    f"  Bande ± 1σ         :  [{band_lo:.4f} ; {band_up:.4f}]"
-)
-ax2.text(0.01, 0.55, metrics, transform=ax2.transAxes,
-         fontsize=9.5, va="top", color=TEXT, family="monospace",
-         linespacing=1.7,
-         bbox=dict(boxstyle="round,pad=0.7", facecolor="white",
-                   edgecolor="#D6E2ED", alpha=0.95))
-
-# Supprimer grilles et bordures
-ax2.grid(False)
-for sp in ax2.spines.values():
-    sp.set_visible(False)
-
-# ── Titre global + footnote ───────────────────────────────────────────────────
-fig.suptitle("Analyse du Portefeuille — Coefficient Tarifaire par Ancienneté",
-             fontsize=17, fontweight="bold", color=NAVY, y=0.99)
-
-fig.text(0.5, 0.003,
-         "Données simulées · CT = Prime Portefeuille / Prime Affaires Nouvelles · σ pondéré par volume contrats",
-         ha="center", fontsize=8, color=SUBTLE, style="italic")
-
-plt.savefig("/mnt/user-data/outputs/analyse_ct_final.png", dpi=200, bbox_inches="tight")
-plt.close()
-print("Graph saved OK")
+print("\n✅ 3 fichiers générés avec succès.")
