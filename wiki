@@ -3,260 +3,378 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.lines import Line2D
+from scipy import stats
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PALETTE
 # ══════════════════════════════════════════════════════════════════════════════
-NAVY      = "#0B2447"
-DEEP      = "#153B6B"
-MID_BLUE  = "#1B6DA3"
-SKY       = "#6EB4D9"
-PALE      = "#A8D4EE"
-BG        = "#F7F5F0"
-TEXT      = "#1C2D3F"
-SUBTLE    = "#8FA3B8"
-WARN      = "#D4760A"
+NAVY     = "#0B2447"
+DEEP     = "#153B6B"
+MID_BLUE = "#1B6DA3"
+SKY      = "#6EB4D9"
+PALE     = "#A8D4EE"
+BG       = "#F7F5F0"
+TEXT     = "#1C2D3F"
+SUBTLE   = "#8FA3B8"
+WARN     = "#D4760A"
+RED      = "#C0392B"
+GREEN    = "#2E7D5B"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. BASE CONTRATS (50 000)
+# 1. BASE CONTRATS — ÂGE CONDUCTEUR (18 → 95 ans)
 # ══════════════════════════════════════════════════════════════════════════════
 np.random.seed(42)
-N = 50_000
+N = 80_000
 
-age = np.random.choice(np.arange(80, 131), size=N,
-        p=np.array([np.exp(-0.5*((a-102)/12)**2) for a in range(80,131)]) /
-          sum([np.exp(-0.5*((a-102)/12)**2) for a in range(80,131)]))
+# Âge conducteur : distribution réaliste, pic 35-55, queue vers 90+
+age_probs = np.array([
+    np.exp(-0.5*((a-45)/15)**2) + 0.05*np.exp(-0.5*((a-75)/10)**2)
+    for a in range(18, 96)
+])
+age_probs /= age_probs.sum()
+age_cond = np.random.choice(np.arange(18, 96), size=N, p=age_probs)
 
-anciennete = np.random.choice(np.arange(0, 26), size=N,
-        p=np.array([np.exp(-0.5*((a-4)/6)**2) for a in range(0,26)]) /
-          sum([np.exp(-0.5*((a-4)/6)**2) for a in range(0,26)]))
+anciennete = np.clip(np.random.exponential(5, N).astype(int), 0, 25)
+majoration = np.clip(np.random.normal(5, 8, N).astype(int), -7, 30)
 
-majoration = np.random.choice(np.arange(-7, 31), size=N,
-        p=np.array([np.exp(-0.5*((m-3)/9)**2) for m in range(-7,31)]) /
-          sum([np.exp(-0.5*((m-3)/9)**2) for m in range(-7,31)]))
+# Prime AN : croît avec âge (surtout 80+)
+prime_an = np.clip(
+    300 + 2.0*age_cond + 0.08*(age_cond**1.3) + 4*majoration
+    + np.random.normal(0, 40, N), 150, 1200)
 
-prime_an = np.clip(250 + 1.5*age + 3*majoration + np.random.normal(0, 30, N), 100, 800)
-
-ct_ind = np.clip(
-    1.18 + 0.006*(anciennete - 12) - 0.003*anciennete
-    + 0.003*np.abs(age - 102) + 0.002*majoration
-    + np.random.normal(0, 0.05, N),  # plus de variance pour voir la distribution
-    0.85, 1.55
+# CT implicite : plus dispersé et plus élevé pour 80+
+ct_base = 1.15 + np.where(age_cond >= 80,
+    0.08 + 0.004*(age_cond - 80) + np.random.normal(0, 0.08, N),  # 80+ : CT élevé + dispersé
+    0.001*(age_cond - 50)**2 / 500 + np.random.normal(0, 0.04, N)  # <80 : CT stable
 )
+ct_base += 0.002 * majoration - 0.002 * anciennete
+ct_ind = np.clip(ct_base, 0.85, 1.65)
 
 prime_ptf = prime_an * ct_ind
 
 df = pd.DataFrame({
-    "prime_an": prime_an, "prime_ptf": prime_ptf,
-    "ct": ct_ind,
-    "age": age, "anciennete": anciennete, "majoration": majoration,
+    "prime_an": np.round(prime_an, 2),
+    "prime_ptf": np.round(prime_ptf, 2),
+    "ct": np.round(ct_ind, 4),
+    "age_conducteur": age_cond,
+    "anciennete": anciennete,
+    "majoration": majoration,
 })
 
-# Segments
-df["seg_anc"] = pd.cut(df["anciennete"], bins=[-1,2,5,10,15,20,25],
-                        labels=["0-2","3-5","6-10","11-15","16-20","21-25"])
-df["seg_maj"] = pd.cut(df["majoration"], bins=[-8,0,5,10,15,20,30],
-                        labels=["≤0","1-5","6-10","11-15","16-20","21-30"])
-df["seg_age"] = pd.cut(df["age"], bins=[79,90,100,110,120,130],
-                        labels=["80-90","91-100","101-110","111-120","121-130"])
+# Tranches d'âge
+bins_age = [17, 25, 35, 45, 55, 65, 75, 80, 85, 90, 95]
+labels_age = ["18-25", "26-35", "36-45", "46-55", "56-65",
+              "66-75", "76-80", "81-85", "86-90", "91-95"]
+df["tranche_age"] = pd.cut(df["age_conducteur"], bins=bins_age, labels=labels_age)
 
 ct_global = df["prime_ptf"].sum() / df["prime_an"].sum()
-ct_median = df["ct"].median()
-ct_mean_ind = df["ct"].mean()
-
-print(f"CT global (ratio sommes) : {ct_global:.4f}")
-print(f"CT moyen individuel      : {ct_mean_ind:.4f}")
-print(f"CT médian individuel     : {ct_median:.4f}")
-print(f"Écart-type CT individuel : {df['ct'].std():.4f}")
+print(f"Base : {len(df):,} contrats | CT global : {ct_global:.4f}")
+print(f"Dont 80+ : {(df['age_conducteur']>=80).sum():,} contrats")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2. FIGURE 1 : VIOLIN GLOBAL — POURQUOI PAS BOXPLOT
+# 2. TABLEAU RÉCAP PAR QUANTILE D'ÂGE
 # ══════════════════════════════════════════════════════════════════════════════
-fig, (ax_v, ax_b) = plt.subplots(1, 2, figsize=(14, 7), facecolor=BG,
-                                  gridspec_kw={"wspace": 0.25})
+def build_recap_table(df, group_col):
+    rows = []
+    for name, grp in df.groupby(group_col, observed=True):
+        ct_seg = grp["prime_ptf"].sum() / grp["prime_an"].sum()
+        ct_vals = grp["ct"]
+        q1, med, q3 = ct_vals.quantile([0.25, 0.5, 0.75])
+        p10, p90 = ct_vals.quantile([0.10, 0.90])
+        iqr = q3 - q1
+        skew = ct_vals.skew()
+        kurt = ct_vals.kurtosis()
+        rows.append({
+            "Tranche": name,
+            "N contrats": len(grp),
+            "% Ptf": len(grp) / len(df) * 100,
+            "Σ Prime AN": grp["prime_an"].sum(),
+            "CT agrégé": ct_seg,
+            "CT moyen": ct_vals.mean(),
+            "CT médian": med,
+            "Écart-type": ct_vals.std(),
+            "CV (%)": ct_vals.std() / ct_vals.mean() * 100,
+            "P10": p10, "Q1": q1, "Q3": q3, "P90": p90,
+            "IQR": iqr,
+            "Skewness": skew,
+            "Kurtosis": kurt,
+        })
+    return pd.DataFrame(rows)
 
-# ── Violin ────────────────────────────────────────────────────────────────
-ax_v.set_facecolor(BG)
-parts = ax_v.violinplot(df["ct"], positions=[0], showmedians=False,
-                         showextrema=False, widths=0.7)
-for body in parts["bodies"]:
-    body.set_facecolor(MID_BLUE)
-    body.set_edgecolor(NAVY)
-    body.set_alpha(0.35)
-    body.set_linewidth(1.2)
+recap = build_recap_table(df, "tranche_age")
+print("\n" + recap.to_string(index=False, float_format="%.4f"))
 
-# Mini boxplot inside
-q1, med, q3 = df["ct"].quantile([0.25, 0.5, 0.75])
-p10, p90 = df["ct"].quantile([0.10, 0.90])
-ax_v.vlines(0, p10, p90, color=NAVY, linewidth=2, zorder=4)
-ax_v.vlines(0, q1, q3, color=NAVY, linewidth=6, zorder=5)
-ax_v.scatter(0, med, color="white", edgecolors=NAVY, s=50, zorder=6, linewidth=1.5)
 
-# Lignes repères
-ax_v.axhline(ct_global, color=WARN, linewidth=1.5, linestyle="--", zorder=3)
-ax_v.axhline(1.0, color=SKY, linewidth=1.5, linestyle="--", alpha=0.7, zorder=3)
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. FIGURE 1 : TABLEAU VISUEL RÉCAP
+# ══════════════════════════════════════════════════════════════════════════════
+fig_tab, ax_tab = plt.subplots(figsize=(20, 7), facecolor=BG)
+ax_tab.set_facecolor(BG)
+ax_tab.axis("off")
 
-# Annotations
-ax_v.text(0.45, ct_global, f"CT global = {ct_global:.4f}", fontsize=9,
-          color=WARN, fontweight="bold", va="center")
-ax_v.text(0.45, 1.0, "CT = 1", fontsize=9, color=SKY, fontweight="bold", va="center")
-ax_v.text(0.45, med, f"Médiane = {med:.4f}", fontsize=9, color=NAVY, va="center")
-ax_v.text(0.45, q1, f"Q1 = {q1:.4f}", fontsize=8, color=SUBTLE, va="center")
-ax_v.text(0.45, q3, f"Q3 = {q3:.4f}", fontsize=8, color=SUBTLE, va="center")
-ax_v.text(0.45, p10, f"P10 = {p10:.4f}", fontsize=8, color=SUBTLE, va="center")
-ax_v.text(0.45, p90, f"P90 = {p90:.4f}", fontsize=8, color=SUBTLE, va="center")
+cols_display = ["Tranche", "N contrats", "% Ptf", "CT agrégé", "CT moyen",
+                "CT médian", "Écart-type", "CV (%)", "P10", "Q1", "Q3", "P90",
+                "IQR", "Skewness", "Kurtosis"]
 
-ax_v.set_ylabel("CT individuel (Prime Ptf / Prime AN)", fontsize=11, color=TEXT, labelpad=8)
-ax_v.set_xticks([0])
-ax_v.set_xticklabels(["Portefeuille\nglobal"], fontsize=11, color=NAVY, fontweight="bold")
-ax_v.set_title("Violin Plot — Distribution du CT", fontsize=13,
-                fontweight="bold", color=NAVY, pad=12)
-ax_v.set_xlim(-0.7, 1.2)
-ax_v.tick_params(axis="y", labelsize=9, colors=TEXT)
-ax_v.grid(False)
-for sp in ax_v.spines.values():
-    sp.set_visible(False)
+cell_text = []
+for _, r in recap.iterrows():
+    cell_text.append([
+        str(r["Tranche"]),
+        f"{int(r['N contrats']):,}".replace(",", " "),
+        f"{r['% Ptf']:.1f}%",
+        f"{r['CT agrégé']:.4f}",
+        f"{r['CT moyen']:.4f}",
+        f"{r['CT médian']:.4f}",
+        f"{r['Écart-type']:.4f}",
+        f"{r['CV (%)']:.1f}%",
+        f"{r['P10']:.4f}", f"{r['Q1']:.4f}",
+        f"{r['Q3']:.4f}", f"{r['P90']:.4f}",
+        f"{r['IQR']:.4f}",
+        f"{r['Skewness']:.2f}",
+        f"{r['Kurtosis']:.2f}",
+    ])
 
-# ── Boxplot seul pour comparaison ─────────────────────────────────────────
-ax_b.set_facecolor(BG)
-bp = ax_b.boxplot(df["ct"], positions=[0], widths=0.4, patch_artist=True,
-                   showfliers=True,
-                   flierprops=dict(marker=".", markersize=2,
-                                   markerfacecolor=SUBTLE, alpha=0.3))
-bp["boxes"][0].set_facecolor(PALE)
-bp["boxes"][0].set_edgecolor(NAVY)
-bp["boxes"][0].set_linewidth(1.2)
-for element in ["whiskers", "caps"]:
-    for line in bp[element]:
-        line.set_color(NAVY)
-        line.set_linewidth(1)
-bp["medians"][0].set_color(WARN)
-bp["medians"][0].set_linewidth(2)
+table = ax_tab.table(cellText=cell_text, colLabels=cols_display,
+                      cellLoc="center", loc="center",
+                      colWidths=[0.07]*15)
+table.auto_set_font_size(False)
+table.set_fontsize(8)
+table.scale(1, 1.5)
 
-ax_b.axhline(ct_global, color=WARN, linewidth=1.5, linestyle="--", zorder=3)
-ax_b.axhline(1.0, color=SKY, linewidth=1.5, linestyle="--", alpha=0.7, zorder=3)
-ax_b.text(0.35, ct_global, f"CT global", fontsize=9, color=WARN, fontweight="bold", va="center")
-ax_b.text(0.35, 1.0, "CT = 1", fontsize=9, color=SKY, fontweight="bold", va="center")
+for (row, col), cell in table.get_celld().items():
+    cell.set_edgecolor("#D6E2ED")
+    cell.set_linewidth(0.5)
+    if row == 0:
+        cell.set_facecolor(NAVY)
+        cell.set_text_props(color="white", fontweight="bold", fontsize=8)
+    else:
+        tranche = cell_text[row-1][0] if row <= len(cell_text) else ""
+        is_80plus = tranche in ["81-85", "86-90", "91-95"]
+        if is_80plus:
+            cell.set_facecolor("#FFF3E6")
+            cell.set_text_props(color=TEXT, fontweight="bold")
+        elif row % 2 == 0:
+            cell.set_facecolor("#F0F4F8")
+            cell.set_text_props(color=TEXT)
+        else:
+            cell.set_facecolor("white")
+            cell.set_text_props(color=TEXT)
 
-ax_b.set_ylabel("CT individuel", fontsize=11, color=TEXT, labelpad=8)
-ax_b.set_xticks([0])
-ax_b.set_xticklabels(["Portefeuille\nglobal"], fontsize=11, color=NAVY, fontweight="bold")
-ax_b.set_title("Boxplot seul — Même données", fontsize=13,
-                fontweight="bold", color=NAVY, pad=12)
-ax_b.set_xlim(-0.7, 1.2)
-ax_b.tick_params(axis="y", labelsize=9, colors=TEXT)
-ax_b.grid(False)
-for sp in ax_b.spines.values():
-    sp.set_visible(False)
+fig_tab.suptitle("Tableau récapitulatif du CT par tranche d'âge conducteur",
+                 fontsize=15, fontweight="bold", color=NAVY, y=0.96)
+fig_tab.text(0.5, 0.04,
+    "Lignes orangées = tranches 80+ ans · CT agrégé = Σ Prime Ptf / Σ Prime AN · "
+    "Skewness > 0 = queue droite (quelques CT très élevés) · Kurtosis élevé = queues lourdes",
+    ha="center", fontsize=8.5, color=SUBTLE, style="italic")
 
-# Annotation pédagogique
-fig.text(0.5, 0.01,
-         "Le violin montre la densité (forme, asymétrie, bimodalité) — "
-         "le boxplot ne montre que 5 chiffres résumés. Pour un CT de portefeuille, le violin est plus riche.",
-         ha="center", fontsize=9, color=DEEP, style="italic")
-
-fig.suptitle("Comparaison Violin vs Boxplot — Distribution globale du CT",
-             fontsize=16, fontweight="bold", color=NAVY, y=0.98)
-plt.savefig("/mnt/user-data/outputs/ct_violin_vs_boxplot.png", dpi=200, bbox_inches="tight")
+plt.savefig("/mnt/user-data/outputs/tableau_recap_ct_age.png", dpi=200, bbox_inches="tight")
 plt.close()
-print("OK  ct_violin_vs_boxplot.png")
+print("\nOK  tableau_recap_ct_age.png")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. FONCTION : VIOLIN PAR SEGMENTS D'UNE VARIABLE
+# 4. FIGURE 2 : FOCUS 80+ — 4 CADRANS
 # ══════════════════════════════════════════════════════════════════════════════
-def plot_violin_segments(df, seg_col, title_var, x_label, filename):
+df_80 = df[df["age_conducteur"] >= 80].copy()
+df_young = df[df["age_conducteur"] < 80].copy()
 
-    segments = df[seg_col].cat.categories.tolist()
-    data_by_seg = [df.loc[df[seg_col] == s, "ct"].values for s in segments]
-    ct_glob = df["prime_ptf"].sum() / df["prime_an"].sum()
+fig, axes = plt.subplots(2, 2, figsize=(18, 12), facecolor=BG,
+                          gridspec_kw={"hspace": 0.35, "wspace": 0.28})
 
-    # CT agrégé par segment (ratio des sommes)
-    ct_agg = []
-    for s in segments:
-        mask = df[seg_col] == s
-        ct_agg.append(df.loc[mask, "prime_ptf"].sum() / df.loc[mask, "prime_an"].sum())
+# ──────────────────────────────────────────────────────────────────────────────
+# A. VIOLIN 80+ vs <80 (haut gauche)
+# ──────────────────────────────────────────────────────────────────────────────
+ax = axes[0, 0]
+ax.set_facecolor(BG)
 
-    fig, ax = plt.subplots(figsize=(16, 7.5), facecolor=BG)
-    ax.set_facecolor(BG)
+data_groups = [df_young["ct"].values, df_80["ct"].values]
+labels_grp = ["< 80 ans", "≥ 80 ans"]
+colors_grp = [MID_BLUE, RED]
 
-    positions = np.arange(len(segments))
-    colors_fill = plt.cm.Blues(np.linspace(0.2, 0.65, len(segments)))
+parts = ax.violinplot(data_groups, positions=[0, 1],
+                       showmedians=False, showextrema=False, widths=0.65)
+for i, body in enumerate(parts["bodies"]):
+    body.set_facecolor(colors_grp[i])
+    body.set_edgecolor(NAVY)
+    body.set_alpha(0.3)
 
-    parts = ax.violinplot(data_by_seg, positions=positions,
-                           showmedians=False, showextrema=False, widths=0.7)
+for i, d in enumerate(data_groups):
+    q1, med, q3 = np.percentile(d, [25, 50, 75])
+    p10, p90 = np.percentile(d, [10, 90])
+    ax.vlines(i, p10, p90, color=NAVY, linewidth=1.5, zorder=4)
+    ax.vlines(i, q1, q3, color=NAVY, linewidth=5, zorder=5)
+    ax.scatter(i, med, color="white", edgecolors=NAVY, s=40, zorder=6, linewidth=1.2)
+    ax.text(i + 0.35, med, f"med={med:.3f}", fontsize=8, color=TEXT, va="center")
+    ax.text(i + 0.35, q3, f"Q3={q3:.3f}", fontsize=7, color=SUBTLE, va="center")
 
-    for i, body in enumerate(parts["bodies"]):
-        body.set_facecolor(colors_fill[i])
-        body.set_edgecolor(NAVY)
-        body.set_alpha(0.4)
-        body.set_linewidth(1)
+ct_young = df_young["prime_ptf"].sum() / df_young["prime_an"].sum()
+ct_old = df_80["prime_ptf"].sum() / df_80["prime_an"].sum()
+ax.scatter([0, 1], [ct_young, ct_old], marker="D", s=70, color=WARN,
+           edgecolors="white", linewidth=1.2, zorder=7)
+ax.text(0.35, ct_young, f"CT agg={ct_young:.3f}", fontsize=8, color=WARN, fontweight="bold")
+ax.text(1.35, ct_old, f"CT agg={ct_old:.3f}", fontsize=8, color=WARN, fontweight="bold")
 
-    # Mini boxplot inside each violin
-    for i, d in enumerate(data_by_seg):
-        q1, med, q3 = np.percentile(d, [25, 50, 75])
-        p10, p90 = np.percentile(d, [10, 90])
-        ax.vlines(i, p10, p90, color=NAVY, linewidth=1.5, zorder=4)
-        ax.vlines(i, q1, q3, color=NAVY, linewidth=5, zorder=5)
-        ax.scatter(i, med, color="white", edgecolors=NAVY, s=35, zorder=6, linewidth=1.2)
+ax.axhline(1.0, color=SKY, linewidth=1.5, linestyle="--", alpha=0.6, zorder=2)
+ax.set_xticks([0, 1])
+ax.set_xticklabels(labels_grp, fontsize=11, color=NAVY, fontweight="bold")
+ax.set_ylabel("CT individuel", fontsize=11, color=TEXT, labelpad=8)
+ax.set_title("Distribution CT : < 80 vs ≥ 80 ans", fontsize=12,
+              fontweight="bold", color=NAVY, pad=10)
+ax.tick_params(axis="y", labelsize=9, colors=TEXT)
+ax.grid(False)
+for sp in ax.spines.values():
+    sp.set_visible(False)
 
-    # CT agrégé par segment (losange)
-    ax.scatter(positions, ct_agg, marker="D", s=70, color=WARN,
-               edgecolors="white", linewidth=1.2, zorder=7, label="CT agrégé (Σptf/Σan)")
+# ──────────────────────────────────────────────────────────────────────────────
+# B. COURBE DE LORENZ — CONCENTRATION DU CT (haut droit)
+# ──────────────────────────────────────────────────────────────────────────────
+ax = axes[0, 1]
+ax.set_facecolor(BG)
 
-    # Lignes
-    ax.axhline(ct_glob, color=WARN, linewidth=1.5, linestyle="--", zorder=3,
-               label=f"CT global ({ct_glob:.4f})")
-    ax.axhline(1.0, color=SKY, linewidth=1.5, linestyle="--", alpha=0.7, zorder=3,
-               label="CT = 1")
+def lorenz_curve(ct_vals, prime_an_vals):
+    """Lorenz du CT : % cumulé de contrats vs % cumulé de surprime."""
+    surprime = prime_an_vals * (ct_vals - 1)  # surprime = prime_ptf - prime_an
+    idx = np.argsort(ct_vals)
+    surprime_sorted = surprime[idx]
+    cum_contrats = np.arange(1, len(ct_vals)+1) / len(ct_vals)
+    cum_surprime = np.cumsum(surprime_sorted) / surprime_sorted.sum()
+    return cum_contrats, cum_surprime
 
-    # Annotations CT agrégé
-    for i, ct_val in enumerate(ct_agg):
-        ax.text(i, ct_val + 0.015, f"{ct_val:.3f}", ha="center", fontsize=8,
-                fontweight="bold", color=WARN)
+# Lorenz 80+
+lx_old, ly_old = lorenz_curve(df_80["ct"].values, df_80["prime_an"].values)
+lx_young, ly_young = lorenz_curve(df_young["ct"].values, df_young["prime_an"].values)
 
-    # Nombre de contrats
-    for i, d in enumerate(data_by_seg):
-        ax.text(i, ax.get_ylim()[0] if ax.get_ylim()[0] > 0.8 else 0.82,
-                f"n={len(d):,}".replace(",", " "),
-                ha="center", fontsize=7.5, color=SUBTLE, style="italic")
+ax.plot(lx_old, ly_old, color=RED, linewidth=2.5, label="≥ 80 ans", zorder=4)
+ax.plot(lx_young, ly_young, color=MID_BLUE, linewidth=2, label="< 80 ans",
+        alpha=0.7, zorder=3)
+ax.plot([0, 1], [0, 1], color=SUBTLE, linewidth=1, linestyle="--", zorder=2,
+        label="Égalité parfaite")
 
-    ax.set_xticks(positions)
-    ax.set_xticklabels(segments, fontsize=10, color=TEXT)
-    ax.set_xlabel(x_label, fontsize=11, color=TEXT, labelpad=8)
-    ax.set_ylabel("CT individuel (Prime Ptf / Prime AN)", fontsize=11, color=TEXT, labelpad=8)
-    ax.tick_params(axis="y", labelsize=9, colors=TEXT)
-    ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
+ax.fill_between(lx_old, lx_old, ly_old, color=RED, alpha=0.08)
 
-    ax.legend(fontsize=10, loc="upper right", frameon=True, fancybox=True,
-              edgecolor="#D6E2ED", facecolor="white", framealpha=0.95)
+# Gini approx
+gini_old = np.trapz(lx_old - ly_old, lx_old) / np.trapz(lx_old, lx_old)
+gini_young = np.trapz(lx_young - ly_young, lx_young) / np.trapz(lx_young, lx_young)
 
-    ax.set_title(f"Distribution du CT par segment de {title_var}",
-                 fontsize=14, fontweight="bold", color=NAVY, pad=12)
+ax.text(0.55, 0.15, f"Gini 80+ = {gini_old:.3f}\nGini <80 = {gini_young:.3f}",
+        fontsize=10, color=TEXT, fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="white", edgecolor="#D6E2ED"))
 
-    ax.grid(False)
-    for sp in ax.spines.values():
-        sp.set_visible(False)
+ax.set_xlabel("% cumulé de contrats (triés par CT croissant)", fontsize=10, color=TEXT)
+ax.set_ylabel("% cumulé de la surprime (prime ptf − prime an)", fontsize=10, color=TEXT)
+ax.set_title("Courbe de Lorenz — Concentration de la surprime",
+              fontsize=12, fontweight="bold", color=NAVY, pad=10)
+ax.legend(fontsize=9.5, loc="upper left", frameon=True, fancybox=True,
+          edgecolor="#D6E2ED", facecolor="white")
+ax.tick_params(labelsize=9, colors=TEXT)
+ax.set_xlim(0, 1); ax.set_ylim(0, 1)
+ax.grid(False)
+for sp in ax.spines.values():
+    sp.set_visible(False)
 
-    fig.text(0.5, 0.003,
-             "Violin = densité du CT individuel par segment · Losange orange = CT agrégé (Σ prime ptf / Σ prime an) · Données simulées",
-             ha="center", fontsize=8, color=SUBTLE, style="italic")
+# ──────────────────────────────────────────────────────────────────────────────
+# C. HEATMAP CT × ÂGE × ANCIENNETÉ pour 80+ (bas gauche)
+# ──────────────────────────────────────────────────────────────────────────────
+ax = axes[1, 0]
+ax.set_facecolor(BG)
 
-    plt.savefig(f"/mnt/user-data/outputs/{filename}", dpi=200, bbox_inches="tight")
-    plt.close()
-    print(f"  OK  {filename}")
+df_80["anc_bin"] = pd.cut(df_80["anciennete"], bins=[-1, 3, 7, 12, 18, 25],
+                           labels=["0-3", "4-7", "8-12", "13-18", "19-25"])
 
+pivot = df_80.groupby(["age_conducteur", "anc_bin"], observed=True).apply(
+    lambda g: g["prime_ptf"].sum() / g["prime_an"].sum() if len(g) > 10 else np.nan
+).unstack()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 4. GÉNÉRATION DES 3 VIOLINS PAR VARIABLE
-# ══════════════════════════════════════════════════════════════════════════════
-print("\nViolins par segments...")
-plot_violin_segments(df, "seg_anc", "Ancienneté", "Tranche d'ancienneté (années)",
-                     "ct_violin_anciennete.png")
-plot_violin_segments(df, "seg_maj", "Majoration", "Tranche de majoration (%)",
-                     "ct_violin_majoration.png")
-plot_violin_segments(df, "seg_age", "Âge", "Tranche d'âge véhicule (mois)",
-                     "ct_violin_age.png")
+im = ax.imshow(pivot.values, cmap="RdYlBu_r", aspect="auto",
+               vmin=1.05, vmax=1.45)
+ax.set_xticks(range(len(pivot.columns)))
+ax.set_xticklabels(pivot.columns, fontsize=9, color=TEXT)
+ax.set_yticks(range(len(pivot.index)))
+ax.set_yticklabels(pivot.index, fontsize=8, color=TEXT)
+ax.set_xlabel("Ancienneté (tranche)", fontsize=11, color=TEXT, labelpad=8)
+ax.set_ylabel("Âge conducteur", fontsize=11, color=TEXT, labelpad=8)
+ax.set_title("Heatmap CT — Âge × Ancienneté (80+ ans)",
+              fontsize=12, fontweight="bold", color=NAVY, pad=10)
 
-print("\n✅ 4 visuels générés.")
+# Valeurs dans les cellules
+for i in range(pivot.shape[0]):
+    for j in range(pivot.shape[1]):
+        val = pivot.values[i, j]
+        if not np.isnan(val):
+            color_txt = "white" if val > 1.30 else TEXT
+            ax.text(j, i, f"{val:.3f}", ha="center", va="center",
+                    fontsize=7.5, color=color_txt, fontweight="bold")
+
+cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.04)
+cbar.set_label("CT agrégé", fontsize=9, color=TEXT)
+cbar.ax.tick_params(labelsize=8, colors=TEXT)
+
+for sp in ax.spines.values():
+    sp.set_visible(False)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# D. DENSITÉ COMPARATIVE (bas droit)
+# ──────────────────────────────────────────────────────────────────────────────
+ax = axes[1, 1]
+ax.set_facecolor(BG)
+
+# KDE
+from scipy.stats import gaussian_kde
+
+x_range = np.linspace(0.85, 1.55, 500)
+kde_old = gaussian_kde(df_80["ct"], bw_method=0.15)
+kde_young = gaussian_kde(df_young["ct"], bw_method=0.15)
+
+ax.fill_between(x_range, kde_old(x_range), color=RED, alpha=0.15, zorder=2)
+ax.plot(x_range, kde_old(x_range), color=RED, linewidth=2.5, label="≥ 80 ans", zorder=4)
+
+ax.fill_between(x_range, kde_young(x_range), color=MID_BLUE, alpha=0.1, zorder=1)
+ax.plot(x_range, kde_young(x_range), color=MID_BLUE, linewidth=2, alpha=0.8,
+        label="< 80 ans", zorder=3)
+
+ax.axvline(ct_old, color=RED, linewidth=1.5, linestyle="--", alpha=0.7)
+ax.axvline(ct_young, color=MID_BLUE, linewidth=1.5, linestyle="--", alpha=0.7)
+ax.axvline(1.0, color=SKY, linewidth=1.5, linestyle="--", alpha=0.5)
+
+ax.text(ct_old + 0.01, ax.get_ylim()[1]*0.85 if ax.get_ylim()[1] > 0 else 5,
+        f"CT agg 80+ = {ct_old:.3f}", fontsize=9, color=RED, fontweight="bold",
+        rotation=90, va="top")
+ax.text(ct_young + 0.01, ax.get_ylim()[1]*0.85 if ax.get_ylim()[1] > 0 else 5,
+        f"CT agg <80 = {ct_young:.3f}", fontsize=9, color=MID_BLUE, fontweight="bold",
+        rotation=90, va="top")
+
+# Zone de surprime excessive (CT > P90 des 80+)
+p90_old = df_80["ct"].quantile(0.90)
+ax.axvspan(p90_old, 1.55, color=RED, alpha=0.05, zorder=0)
+ax.text(p90_old + 0.01, kde_old(np.array([p90_old]))[0],
+        f"P90 = {p90_old:.3f}\nQueue à risque →",
+        fontsize=8, color=RED, style="italic")
+
+ax.set_xlabel("CT individuel", fontsize=11, color=TEXT, labelpad=8)
+ax.set_ylabel("Densité", fontsize=11, color=TEXT, labelpad=8)
+ax.set_title("Densité KDE comparative du CT",
+              fontsize=12, fontweight="bold", color=NAVY, pad=10)
+ax.legend(fontsize=10, loc="upper right", frameon=True, fancybox=True,
+          edgecolor="#D6E2ED", facecolor="white")
+ax.tick_params(labelsize=9, colors=TEXT)
+ax.grid(False)
+for sp in ax.spines.values():
+    sp.set_visible(False)
+
+# ── Global ────────────────────────────────────────────────────────────────────
+fig.suptitle("Focus conducteurs ≥ 80 ans — Analyse de la dispersion du CT",
+             fontsize=17, fontweight="bold", color=NAVY, y=0.99)
+
+ecart = ct_old - ct_young
+fig.text(0.5, 0.005,
+    f"Écart CT agrégé : 80+ ({ct_old:.4f}) vs <80 ({ct_young:.4f}) = +{ecart:.4f} "
+    f"(+{ecart/ct_young:.1%}) · Gini 80+ = {gini_old:.3f} vs <80 = {gini_young:.3f}",
+    ha="center", fontsize=9.5, color=NAVY, fontweight="bold",
+    bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor="#D6E2ED"))
+
+plt.savefig("/mnt/user-data/outputs/focus_80plus.png", dpi=200, bbox_inches="tight")
+plt.close()
+print("OK  focus_80plus.png")
+
+print("\n✅ Terminé.")
