@@ -14,3 +14,15 @@ google-generativeai
 chromadb
 sentence-transformers
 pypdf
+
+
+Titre : Analyse du Coefficient Tarifaire Moyen du Portefeuille Auto
+Sous-titre : Étude de la dispersion et des drivers du CT par variable de segmentation — Bilan trimestriel 2025
+Objectif de l'étude :
+Mesurer l'écart entre la tarification du portefeuille existant et celle des affaires nouvelles à travers le coefficient tarifaire (CT)
+Identifier les segments à forte pression tarifaire (CT élevé → risque de résiliation) et les segments sous-tarifés (CT bas → manque à gagner)
+Quantifier les drivers qui influencent le CT pour orienter la stratégie de révision tarifaire
+Définitions clés :
+CT agrégé (par segment) : rapport entre la somme des primes portefeuille et la somme des primes affaires nouvelles du segment. CT = Σ Prime Ptf / Σ Prime AN. C'est la métrique officielle — elle reflète le poids économique réel de chaque contrat dans le calcul. Un CT agrégé de 1.20 signifie que le portefeuille paie en moyenne 20% de plus que ce que paierait un nouveau client pour le même profil de risque.
+CT moyen (individuel) : moyenne arithmétique des CT contrat par contrat au sein du segment. Chaque contrat pèse le même poids, qu'il ait une prime de 150€ ou de 1 200€. Utile pour analyser la distribution statistique (violin, écart-type) mais ne reflète pas la réalité économique du portefeuille.
+Écart entre les deux : quand le CT agrégé est supérieur au CT moyen, cela signifie que les contrats à prime élevée ont un CT plus fort — les gros contrats subissent plus de pression tarifaire.
