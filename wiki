@@ -1,12 +1,26 @@
+"""
+════════════════════════════════════════════════════════════════════════════════
+PIPELINE CATBOOST — FEATURE IMPORTANCE DU CT
+════════════════════════════════════════════════════════════════════════════════
+Objectif : identifier et visualiser les variables qui influencent le CT
+Modèle   : CatBoostRegressor (gère nativement les catégorielles)
+Sortie   : 5 visuels PNG + tableau console
+
+Prérequis : pip install catboost shap matplotlib pandas scikit-learn
+════════════════════════════════════════════════════════════════════════════════
+"""
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.lines import Line2D
-from scipy import stats
+from matplotlib.patches import Patch
+import warnings
+warnings.filterwarnings("ignore")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PALETTE
+# 0. PALETTE & CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
 NAVY     = "#0B2447"
 DEEP     = "#153B6B"
@@ -20,361 +34,553 @@ WARN     = "#D4760A"
 RED      = "#C0392B"
 GREEN    = "#2E7D5B"
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 1. BASE CONTRATS — ÂGE CONDUCTEUR (18 → 95 ans)
-# ══════════════════════════════════════════════════════════════════════════════
-np.random.seed(42)
-N = 80_000
+OUTPUT_DIR = "."  # ← adapter si besoin
 
-# Âge conducteur : distribution réaliste, pic 35-55, queue vers 90+
-age_probs = np.array([
-    np.exp(-0.5*((a-45)/15)**2) + 0.05*np.exp(-0.5*((a-75)/10)**2)
-    for a in range(18, 96)
-])
-age_probs /= age_probs.sum()
-age_cond = np.random.choice(np.arange(18, 96), size=N, p=age_probs)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 1. SIMULATION DE LA BASE CONTRATS
+# ══════════════════════════════════════════════════════════════════════════════
+# ⚠️  REMPLACER CE BLOC PAR TA VRAIE BASE
+#     df = spark.sql("SELECT * FROM ta_table").toPandas()
+#     ou df = pd.read_csv("ta_base.csv")
+#     puis adapter les noms de colonnes
+
+np.random.seed(42)
+N = 60_000
+
+age_cond = np.random.choice(np.arange(18, 96), size=N,
+    p=(lambda x: x/x.sum())(np.array([
+        np.exp(-0.5*((a-45)/15)**2) + 0.05*np.exp(-0.5*((a-75)/10)**2)
+        for a in range(18, 96)])))
 
 anciennete = np.clip(np.random.exponential(5, N).astype(int), 0, 25)
 majoration = np.clip(np.random.normal(5, 8, N).astype(int), -7, 30)
+canal = np.random.choice(["Agent", "Courtier", "Direct"], N, p=[0.45, 0.35, 0.20])
+zone_geo = np.random.choice([1, 2, 3, 4, 5, 6], N, p=[0.10, 0.20, 0.25, 0.22, 0.15, 0.08])
+formule = np.random.choice(["Tiers", "Intermédiaire", "Tous Risques"], N, p=[0.30, 0.35, 0.35])
+puissance = np.clip(np.random.lognormal(1.6, 0.4, N).astype(int), 3, 25)
+usage = np.random.choice(["Loisir", "Trajet"], N, p=[0.65, 0.35])
+freq_sinistre = np.clip(np.random.exponential(0.15, N), 0, 1.5)
+nb_sinistres_3ans = np.random.poisson(0.4, N)
+nb_conducteurs = np.random.choice([1, 2, 3], N, p=[0.60, 0.30, 0.10])
 
-# Prime AN : croît avec âge (surtout 80+)
+# Prime AN (NON incluse dans le modèle — juste pour calculer CT)
 prime_an = np.clip(
-    300 + 2.0*age_cond + 0.08*(age_cond**1.3) + 4*majoration
-    + np.random.normal(0, 40, N), 150, 1200)
+    200 + 1.8*age_cond + 15*puissance + 20*zone_geo + 5*majoration
+    + 30*(formule == "Tous Risques").astype(int)
+    + 40*freq_sinistre + np.random.normal(0, 35, N), 120, 1500)
 
-# CT implicite : plus dispersé et plus élevé pour 80+
-ct_base = 1.15 + np.where(age_cond >= 80,
-    0.08 + 0.004*(age_cond - 80) + np.random.normal(0, 0.08, N),  # 80+ : CT élevé + dispersé
-    0.001*(age_cond - 50)**2 / 500 + np.random.normal(0, 0.04, N)  # <80 : CT stable
-)
-ct_base += 0.002 * majoration - 0.002 * anciennete
-ct_ind = np.clip(ct_base, 0.85, 1.65)
+# CT cible
+canal_effect = np.where(canal == "Direct", -0.02, np.where(canal == "Courtier", 0.015, 0))
+formule_effect = np.where(formule == "Tous Risques", 0.01, np.where(formule == "Tiers", -0.005, 0))
+usage_effect = np.where(usage == "Trajet", 0.012, 0)
 
-prime_ptf = prime_an * ct_ind
+ct = np.clip(
+    1.12
+    - 0.004 * anciennete
+    + 0.0015 * np.abs(age_cond - 45)
+    + np.where(age_cond >= 80, 0.06 + 0.003*(age_cond-80), 0)
+    + 0.0025 * majoration
+    + canal_effect
+    + 0.008 * (zone_geo - 3)
+    + formule_effect
+    + usage_effect
+    + 0.04 * freq_sinistre
+    + 0.008 * nb_sinistres_3ans
+    + 0.005 * (nb_conducteurs - 1)
+    + np.random.normal(0, 0.035, N),
+    0.85, 1.60)
 
 df = pd.DataFrame({
-    "prime_an": np.round(prime_an, 2),
-    "prime_ptf": np.round(prime_ptf, 2),
-    "ct": np.round(ct_ind, 4),
     "age_conducteur": age_cond,
     "anciennete": anciennete,
     "majoration": majoration,
+    "canal": canal,
+    "zone_geo": zone_geo,
+    "formule": formule,
+    "puissance": puissance,
+    "usage": usage,
+    "freq_sinistre": np.round(freq_sinistre, 4),
+    "nb_sinistres_3ans": nb_sinistres_3ans,
+    "nb_conducteurs": nb_conducteurs,
+    "ct": np.round(ct, 4),
 })
 
-# Tranches d'âge
-bins_age = [17, 25, 35, 45, 55, 65, 75, 80, 85, 90, 95]
-labels_age = ["18-25", "26-35", "36-45", "46-55", "56-65",
-              "66-75", "76-80", "81-85", "86-90", "91-95"]
-df["tranche_age"] = pd.cut(df["age_conducteur"], bins=bins_age, labels=labels_age)
-
-ct_global = df["prime_ptf"].sum() / df["prime_an"].sum()
-print(f"Base : {len(df):,} contrats | CT global : {ct_global:.4f}")
-print(f"Dont 80+ : {(df['age_conducteur']>=80).sum():,} contrats")
+print(f"{'='*70}")
+print(f"  BASE : {N:,} contrats | CT moyen : {df['ct'].mean():.4f}")
+print(f"{'='*70}")
+print(df.head(8).to_string(index=False))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2. TABLEAU RÉCAP PAR QUANTILE D'ÂGE
+# 2. PRÉPARATION FEATURES
 # ══════════════════════════════════════════════════════════════════════════════
-def build_recap_table(df, group_col):
-    rows = []
-    for name, grp in df.groupby(group_col, observed=True):
-        ct_seg = grp["prime_ptf"].sum() / grp["prime_an"].sum()
-        ct_vals = grp["ct"]
-        q1, med, q3 = ct_vals.quantile([0.25, 0.5, 0.75])
-        p10, p90 = ct_vals.quantile([0.10, 0.90])
-        iqr = q3 - q1
-        skew = ct_vals.skew()
-        kurt = ct_vals.kurtosis()
-        rows.append({
-            "Tranche": name,
-            "N contrats": len(grp),
-            "% Ptf": len(grp) / len(df) * 100,
-            "Σ Prime AN": grp["prime_an"].sum(),
-            "CT agrégé": ct_seg,
-            "CT moyen": ct_vals.mean(),
-            "CT médian": med,
-            "Écart-type": ct_vals.std(),
-            "CV (%)": ct_vals.std() / ct_vals.mean() * 100,
-            "P10": p10, "Q1": q1, "Q3": q3, "P90": p90,
-            "IQR": iqr,
-            "Skewness": skew,
-            "Kurtosis": kurt,
-        })
-    return pd.DataFrame(rows)
 
-recap = build_recap_table(df, "tranche_age")
-print("\n" + recap.to_string(index=False, float_format="%.4f"))
+# ── Variables catégorielles (CatBoost les gère nativement) ────────────────────
+CAT_FEATURES = ["canal", "formule", "usage"]
+
+# ── Variables numériques ──────────────────────────────────────────────────────
+NUM_FEATURES = [
+    "age_conducteur", "anciennete", "majoration", "zone_geo",
+    "puissance", "freq_sinistre", "nb_sinistres_3ans", "nb_conducteurs",
+]
+
+# ── Variables dérivées (interactions) ─────────────────────────────────────────
+df["age_x_anciennete"] = df["age_conducteur"] * df["anciennete"]
+df["maj_x_anciennete"] = df["majoration"] * df["anciennete"]
+df["is_80plus"] = (df["age_conducteur"] >= 80).astype(int)
+
+INTERACTION_FEATURES = ["age_x_anciennete", "maj_x_anciennete", "is_80plus"]
+
+# ── Liste complète ────────────────────────────────────────────────────────────
+ALL_FEATURES = NUM_FEATURES + CAT_FEATURES + INTERACTION_FEATURES
+TARGET = "ct"
+
+# ⛔ EXCLUSIONS (pas de prime AN / prime Ptf → leakage)
+print(f"\n⛔ Variables exclues : prime_an, prime_ptf (composantes du CT)")
+print(f"✅ Features retenues : {len(ALL_FEATURES)}")
+print(f"   Numériques     : {NUM_FEATURES}")
+print(f"   Catégorielles  : {CAT_FEATURES}")
+print(f"   Interactions   : {INTERACTION_FEATURES}")
+
+LABELS_FR = {
+    "age_conducteur": "Âge conducteur", "anciennete": "Ancienneté",
+    "majoration": "Majoration / Malus", "zone_geo": "Zone géographique",
+    "puissance": "Puissance (CV)", "freq_sinistre": "Fréq. sinistres",
+    "nb_sinistres_3ans": "Nb sin. 3 ans", "nb_conducteurs": "Nb conducteurs",
+    "canal": "Canal distribution", "formule": "Formule garantie",
+    "usage": "Usage véhicule", "age_x_anciennete": "Âge × Ancienneté",
+    "maj_x_anciennete": "Majo × Ancienneté", "is_80plus": "Flag 80+",
+}
+
+GROUPE = {f: "Tarifaire" for f in NUM_FEATURES[:5]}
+GROUPE.update({f: "Comportemental" for f in NUM_FEATURES[5:] + CAT_FEATURES})
+GROUPE.update({"usage": "Tarifaire"})
+GROUPE.update({f: "Interaction" for f in INTERACTION_FEATURES})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. FIGURE 1 : TABLEAU VISUEL RÉCAP
+# 3. TRAIN / TEST SPLIT
 # ══════════════════════════════════════════════════════════════════════════════
-fig_tab, ax_tab = plt.subplots(figsize=(20, 7), facecolor=BG)
+from sklearn.model_selection import train_test_split
+
+X = df[ALL_FEATURES].copy()
+y = df[TARGET]
+
+# CatBoost veut les cat features en string
+for col in CAT_FEATURES:
+    X[col] = X[col].astype(str)
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.25, random_state=42)
+
+cat_indices = [ALL_FEATURES.index(c) for c in CAT_FEATURES]
+
+print(f"\nTrain : {len(X_train):,} | Test : {len(X_test):,}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 4. CATBOOST — ENTRAÎNEMENT
+# ══════════════════════════════════════════════════════════════════════════════
+from catboost import CatBoostRegressor, Pool
+
+train_pool = Pool(X_train, y_train, cat_features=cat_indices)
+test_pool = Pool(X_test, y_test, cat_features=cat_indices)
+
+model = CatBoostRegressor(
+    iterations=800,
+    learning_rate=0.05,
+    depth=6,
+    l2_leaf_reg=3,
+    min_data_in_leaf=50,
+    subsample=0.8,
+    random_seed=42,
+    verbose=100,
+    eval_metric="MAE",
+    early_stopping_rounds=50,
+)
+
+model.fit(train_pool, eval_set=test_pool, use_best_model=True)
+
+from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
+
+y_pred = model.predict(X_test)
+mae = mean_absolute_error(y_test, y_pred)
+rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+r2 = r2_score(y_test, y_pred)
+
+print(f"\n{'='*50}")
+print(f"  PERFORMANCE CATBOOST")
+print(f"  R²   = {r2:.4f}")
+print(f"  MAE  = {mae:.5f}")
+print(f"  RMSE = {rmse:.5f}")
+print(f"{'='*50}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. FEATURE IMPORTANCE — 3 MÉTHODES CATBOOST
+# ══════════════════════════════════════════════════════════════════════════════
+
+# A. Importance native CatBoost (PredictionValuesChange)
+imp_native = model.get_feature_importance(train_pool, type="PredictionValuesChange")
+
+# B. Importance par LossFunctionChange (plus fiable)
+imp_loss = model.get_feature_importance(train_pool, type="LossFunctionChange")
+
+# C. SHAP values
+shap_values = model.get_feature_importance(train_pool, type="ShapValues")
+# CatBoost retourne shap_values avec une colonne bias en dernier
+shap_vals = shap_values[:, :-1]
+shap_imp = np.abs(shap_vals).mean(axis=0)
+
+# D. Permutation importance (sklearn)
+from sklearn.inspection import permutation_importance
+perm = permutation_importance(model, X_test, y_test,
+                               n_repeats=15, random_state=42, n_jobs=-1)
+
+# ── Consolidation ─────────────────────────────────────────────────────────────
+imp = pd.DataFrame({
+    "feature": ALL_FEATURES,
+    "native": imp_native,
+    "loss_change": imp_loss,
+    "shap": shap_imp,
+    "permutation": perm.importances_mean,
+    "perm_std": perm.importances_std,
+})
+
+for col in ["native", "loss_change", "shap", "permutation"]:
+    imp[f"{col}_pct"] = imp[col] / imp[col].sum() * 100
+
+imp["rang_moyen"] = (
+    imp["native_pct"].rank(ascending=False) +
+    imp["loss_change_pct"].rank(ascending=False) +
+    imp["shap_pct"].rank(ascending=False) +
+    imp["permutation_pct"].rank(ascending=False)
+) / 4
+
+imp = imp.sort_values("rang_moyen")
+imp["label_fr"] = imp["feature"].map(LABELS_FR)
+imp["groupe"] = imp["feature"].map(GROUPE)
+
+print("\n── RANKING CONSENSUS (4 méthodes) ──")
+print(imp[["feature", "groupe", "native_pct", "loss_change_pct",
+           "shap_pct", "permutation_pct", "rang_moyen"]]
+      .to_string(index=False, float_format="%.1f"))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. VISUEL 1 : COMPARAISON 4 MÉTHODES (barres horizontales)
+# ══════════════════════════════════════════════════════════════════════════════
+fig, axes = plt.subplots(2, 2, figsize=(20, 13), facecolor=BG,
+                          gridspec_kw={"hspace": 0.35, "wspace": 0.30})
+
+group_colors = {"Tarifaire": MID_BLUE, "Comportemental": WARN, "Interaction": SKY}
+
+configs = [
+    ("native_pct", "CatBoost — PredictionValuesChange", NAVY),
+    ("loss_change_pct", "CatBoost — LossFunctionChange", DEEP),
+    ("shap_pct", "CatBoost — SHAP (|mean|)", MID_BLUE),
+    ("permutation_pct", "Permutation Importance (sklearn)", WARN),
+]
+
+for ax, (col, title, default_color) in zip(axes.flat, configs):
+    ax.set_facecolor(BG)
+    df_plot = imp.sort_values(col, ascending=True)
+    bar_colors = [group_colors.get(g, default_color) for g in df_plot["groupe"]]
+
+    ax.barh(range(len(df_plot)), df_plot[col],
+            color=bar_colors, edgecolor="white", linewidth=0.5, height=0.65)
+    for i, (val, lbl) in enumerate(zip(df_plot[col], df_plot["label_fr"])):
+        ax.text(val + 0.3, i, f"{val:.1f}%", va="center", fontsize=8.5,
+                color=TEXT, fontweight="bold")
+
+    ax.set_yticks(range(len(df_plot)))
+    ax.set_yticklabels(df_plot["label_fr"], fontsize=9.5, color=TEXT)
+    ax.set_xlabel("Importance (%)", fontsize=10, color=TEXT)
+    ax.set_title(title, fontsize=11, fontweight="bold", color=NAVY, pad=10)
+    ax.tick_params(axis="x", labelsize=9, colors=TEXT)
+    ax.grid(False)
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+
+leg = [Patch(color=MID_BLUE, label="Tarifaire"),
+       Patch(color=WARN, label="Comportemental"),
+       Patch(color=SKY, label="Interaction")]
+axes[0, 0].legend(handles=leg, fontsize=8, loc="lower right",
+                   frameon=True, fancybox=True, edgecolor="#D6E2ED", facecolor="white")
+
+fig.suptitle(
+    f"Feature Importance CatBoost — 4 méthodes croisées\n"
+    f"R² = {r2:.4f}  |  MAE = {mae:.5f}  |  RMSE = {rmse:.5f}",
+    fontsize=15, fontweight="bold", color=NAVY, y=0.99)
+fig.text(0.5, 0.005,
+    "Native = PredictionValuesChange · LossChange = impact sur la loss · "
+    "SHAP = contribution marginale · Permutation = dégradation MAE",
+    ha="center", fontsize=9, color=SUBTLE, style="italic")
+
+plt.savefig(f"{OUTPUT_DIR}/catboost_importance_4methods.png", dpi=200, bbox_inches="tight")
+plt.close()
+print("\nOK  catboost_importance_4methods.png")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 7. VISUEL 2 : SHAP BEESWARM (summary plot)
+# ══════════════════════════════════════════════════════════════════════════════
+fig_shap, ax_shap = plt.subplots(figsize=(14, 9), facecolor=BG)
+ax_shap.set_facecolor(BG)
+
+# Ordre par importance SHAP
+order = np.argsort(np.abs(shap_vals).mean(axis=0))[::-1]
+
+# Sous-échantillon pour le plot
+n_sample = min(3000, len(shap_vals))
+rng = np.random.default_rng(42)
+sample_idx = rng.choice(len(shap_vals), n_sample, replace=False)
+
+for rank, feat_idx in enumerate(order[::-1]):  # bottom to top
+    feat_name = ALL_FEATURES[feat_idx]
+    vals = shap_vals[sample_idx, feat_idx]
+
+    # Valeurs de la feature (pour la couleur)
+    feat_vals = X_train.iloc[sample_idx, feat_idx]
+    if feat_name in CAT_FEATURES:
+        # Encoder en numérique pour la couleur
+        feat_vals = pd.Categorical(feat_vals).codes.astype(float)
+    else:
+        feat_vals = feat_vals.values.astype(float)
+
+    fmin, fmax = np.nanpercentile(feat_vals, [2, 98])
+    if fmax > fmin:
+        normed = np.clip((feat_vals - fmin) / (fmax - fmin), 0, 1)
+    else:
+        normed = np.full_like(feat_vals, 0.5)
+
+    jitter = np.random.normal(0, 0.15, len(vals))
+    ax_shap.scatter(vals, rank + jitter, c=normed, cmap="RdYlBu_r",
+                    s=6, alpha=0.45, edgecolors="none", rasterized=True)
+
+ax_shap.set_yticks(range(len(order)))
+ax_shap.set_yticklabels([LABELS_FR.get(ALL_FEATURES[i], ALL_FEATURES[i])
+                          for i in order[::-1]], fontsize=10, color=TEXT)
+ax_shap.axvline(0, color=SUBTLE, linewidth=1, alpha=0.5)
+ax_shap.set_xlabel("SHAP value (impact sur le CT prédit)", fontsize=11, color=TEXT)
+ax_shap.set_title("SHAP Summary — Direction & magnitude de chaque variable",
+                   fontsize=14, fontweight="bold", color=NAVY, pad=12)
+ax_shap.tick_params(axis="x", labelsize=9, colors=TEXT)
+
+sm = plt.cm.ScalarMappable(cmap="RdYlBu_r", norm=plt.Normalize(0, 1))
+sm.set_array([])
+cbar = fig_shap.colorbar(sm, ax=ax_shap, fraction=0.02, pad=0.04)
+cbar.set_ticks([0, 1])
+cbar.set_ticklabels(["Valeur basse", "Valeur haute"])
+cbar.ax.tick_params(labelsize=9, colors=TEXT)
+
+ax_shap.grid(False)
+for sp in ax_shap.spines.values():
+    sp.set_visible(False)
+
+fig_shap.text(0.5, 0.005,
+    "Chaque point = 1 contrat · X = impact SHAP sur CT · "
+    "Rouge = valeur haute de la variable · Bleu = valeur basse",
+    ha="center", fontsize=9, color=SUBTLE, style="italic")
+
+plt.savefig(f"{OUTPUT_DIR}/catboost_shap_summary.png", dpi=200, bbox_inches="tight")
+plt.close()
+print("OK  catboost_shap_summary.png")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 8. VISUEL 3 : SHAP DEPENDENCE PLOTS (top 6)
+# ══════════════════════════════════════════════════════════════════════════════
+top6_idx = order[:6]
+
+fig_dep, axes_dep = plt.subplots(2, 3, figsize=(20, 11), facecolor=BG,
+                                  gridspec_kw={"hspace": 0.35, "wspace": 0.25})
+
+for ax, feat_idx in zip(axes_dep.flat, top6_idx):
+    ax.set_facecolor(BG)
+    feat_name = ALL_FEATURES[feat_idx]
+
+    feat_vals = X_train.iloc[sample_idx, feat_idx]
+    sv = shap_vals[sample_idx, feat_idx]
+
+    if feat_name in CAT_FEATURES:
+        # Boxplot par catégorie
+        cats = feat_vals.unique()
+        data_by_cat = [sv[feat_vals == c] for c in sorted(cats)]
+        bp = ax.boxplot(data_by_cat, patch_artist=True, widths=0.5,
+                        showfliers=False)
+        colors_bp = plt.cm.Blues(np.linspace(0.3, 0.7, len(cats)))
+        for patch, color in zip(bp["boxes"], colors_bp):
+            patch.set_facecolor(color)
+            patch.set_edgecolor(NAVY)
+        for m in bp["medians"]:
+            m.set_color(WARN)
+            m.set_linewidth(2)
+        ax.set_xticklabels(sorted(cats), fontsize=9, color=TEXT)
+    else:
+        feat_vals_num = feat_vals.values.astype(float)
+        sc = ax.scatter(feat_vals_num, sv, c=feat_vals_num, cmap="RdYlBu_r",
+                        s=8, alpha=0.35, edgecolors="none", rasterized=True)
+        # Trend
+        sort_i = np.argsort(feat_vals_num)
+        window = max(len(feat_vals_num) // 30, 10)
+        tx = pd.Series(feat_vals_num[sort_i]).rolling(window, center=True).mean()
+        ty = pd.Series(sv[sort_i]).rolling(window, center=True).mean()
+        ax.plot(tx, ty, color=RED, linewidth=2.5, zorder=5)
+
+    ax.axhline(0, color=SUBTLE, linewidth=1, alpha=0.5)
+
+    delta = sv.max() - sv.min()
+    ax.text(0.02, 0.95, f"Δ SHAP = {delta:.4f}", transform=ax.transAxes,
+            fontsize=9, color=DEEP, fontweight="bold", va="top",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                      edgecolor="#D6E2ED", alpha=0.9))
+
+    ax.set_xlabel(LABELS_FR.get(feat_name, feat_name), fontsize=10, color=TEXT)
+    ax.set_ylabel("SHAP value", fontsize=10, color=TEXT)
+    ax.set_title(LABELS_FR.get(feat_name, feat_name),
+                 fontsize=11, fontweight="bold", color=NAVY, pad=8)
+    ax.tick_params(labelsize=8, colors=TEXT)
+    ax.grid(False)
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+
+fig_dep.suptitle("SHAP Dependence Plots — Effet de chaque variable sur le CT (CatBoost)",
+                 fontsize=16, fontweight="bold", color=NAVY, y=0.99)
+fig_dep.text(0.5, 0.005,
+    "Ligne rouge = tendance · Positif = augmente CT · Négatif = diminue CT · "
+    "Variables catégorielles = boxplot par modalité",
+    ha="center", fontsize=9, color=SUBTLE, style="italic")
+
+plt.savefig(f"{OUTPUT_DIR}/catboost_shap_dependence.png", dpi=200, bbox_inches="tight")
+plt.close()
+print("OK  catboost_shap_dependence.png")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 9. VISUEL 4 : SHAP INTERACTION (top 2 variables)
+# ══════════════════════════════════════════════════════════════════════════════
+top2 = [ALL_FEATURES[i] for i in order[:2]]
+
+fig_int, ax_int = plt.subplots(figsize=(12, 8), facecolor=BG)
+ax_int.set_facecolor(BG)
+
+feat1, feat2 = top2[0], top2[1]
+f1_vals = X_train.iloc[sample_idx][feat1].values.astype(float)
+f2_vals = X_train.iloc[sample_idx][feat2].values.astype(float)
+shap1 = shap_vals[sample_idx, ALL_FEATURES.index(feat1)]
+
+sc = ax_int.scatter(f1_vals, shap1, c=f2_vals, cmap="RdYlBu_r",
+                    s=12, alpha=0.5, edgecolors="none", rasterized=True)
+
+cbar = fig_int.colorbar(sc, ax=ax_int, fraction=0.03, pad=0.04)
+cbar.set_label(LABELS_FR.get(feat2, feat2), fontsize=10, color=TEXT)
+cbar.ax.tick_params(labelsize=9, colors=TEXT)
+
+ax_int.axhline(0, color=SUBTLE, linewidth=1, alpha=0.5)
+ax_int.set_xlabel(LABELS_FR.get(feat1, feat1), fontsize=12, color=TEXT)
+ax_int.set_ylabel(f"SHAP value de {LABELS_FR.get(feat1, feat1)}", fontsize=12, color=TEXT)
+ax_int.set_title(f"Interaction SHAP : {LABELS_FR[feat1]} coloré par {LABELS_FR[feat2]}",
+                 fontsize=14, fontweight="bold", color=NAVY, pad=12)
+ax_int.tick_params(labelsize=9, colors=TEXT)
+ax_int.grid(False)
+for sp in ax_int.spines.values():
+    sp.set_visible(False)
+
+plt.savefig(f"{OUTPUT_DIR}/catboost_shap_interaction.png", dpi=200, bbox_inches="tight")
+plt.close()
+print("OK  catboost_shap_interaction.png")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 10. VISUEL 5 : TABLEAU RANKING FINAL
+# ══════════════════════════════════════════════════════════════════════════════
+interpretations = {
+    "age_conducteur": "U-shape. Jeunes + 80+ = CT élevé",
+    "anciennete": "Linéaire ↓. Fidélité = CT stabilisé",
+    "majoration": "Linéaire ↑. Top driver systématique",
+    "zone_geo": "CT ↑ zones risquées (urbain)",
+    "formule": "Tous Risques > Intermédiaire > Tiers",
+    "puissance": "Effet log, marginal > 10 CV",
+    "usage": "Trajet domicile-travail = CT ↑",
+    "canal": "Direct < Agent < Courtier",
+    "freq_sinistre": "CT ↑ repricing post-sinistre",
+    "nb_sinistres_3ans": "Historique sinistres 3 ans",
+    "nb_conducteurs": "Multi-conducteur = CT ↑ (faible)",
+    "age_x_anciennete": "80 ans fidèle ≠ 80 ans nouveau",
+    "maj_x_anciennete": "Gros malus + récent = risque",
+    "is_80plus": "Saut CT brutal à 80 ans",
+}
+
+fig_tab, ax_tab = plt.subplots(figsize=(22, 9), facecolor=BG)
 ax_tab.set_facecolor(BG)
 ax_tab.axis("off")
 
-cols_display = ["Tranche", "N contrats", "% Ptf", "CT agrégé", "CT moyen",
-                "CT médian", "Écart-type", "CV (%)", "P10", "Q1", "Q3", "P90",
-                "IQR", "Skewness", "Kurtosis"]
+header = ["#", "Groupe", "Variable", "% Native", "% LossChange",
+          "% SHAP", "% Permut.", "Rang", "Interprétation"]
 
-cell_text = []
-for _, r in recap.iterrows():
-    cell_text.append([
-        str(r["Tranche"]),
-        f"{int(r['N contrats']):,}".replace(",", " "),
-        f"{r['% Ptf']:.1f}%",
-        f"{r['CT agrégé']:.4f}",
-        f"{r['CT moyen']:.4f}",
-        f"{r['CT médian']:.4f}",
-        f"{r['Écart-type']:.4f}",
-        f"{r['CV (%)']:.1f}%",
-        f"{r['P10']:.4f}", f"{r['Q1']:.4f}",
-        f"{r['Q3']:.4f}", f"{r['P90']:.4f}",
-        f"{r['IQR']:.4f}",
-        f"{r['Skewness']:.2f}",
-        f"{r['Kurtosis']:.2f}",
+rows = []
+for i, (_, r) in enumerate(imp.iterrows()):
+    rows.append([
+        str(i+1), r["groupe"], r["label_fr"],
+        f"{r['native_pct']:.1f}%", f"{r['loss_change_pct']:.1f}%",
+        f"{r['shap_pct']:.1f}%", f"{r['permutation_pct']:.1f}%",
+        f"{r['rang_moyen']:.1f}",
+        interpretations.get(r["feature"], "—"),
     ])
 
-table = ax_tab.table(cellText=cell_text, colLabels=cols_display,
+table = ax_tab.table(cellText=rows, colLabels=header,
                       cellLoc="center", loc="center",
-                      colWidths=[0.07]*15)
+                      colWidths=[0.03, 0.09, 0.12, 0.07, 0.08, 0.07, 0.07, 0.05, 0.35])
 table.auto_set_font_size(False)
-table.set_fontsize(8)
-table.scale(1, 1.5)
+table.set_fontsize(8.5)
+table.scale(1, 1.55)
+
+grp_colors = {"Tarifaire": "#E8F0FE", "Comportemental": "#FFF3E6", "Interaction": "#E8F8F0"}
 
 for (row, col), cell in table.get_celld().items():
     cell.set_edgecolor("#D6E2ED")
     cell.set_linewidth(0.5)
     if row == 0:
         cell.set_facecolor(NAVY)
-        cell.set_text_props(color="white", fontweight="bold", fontsize=8)
+        cell.set_text_props(color="white", fontweight="bold", fontsize=8.5)
     else:
-        tranche = cell_text[row-1][0] if row <= len(cell_text) else ""
-        is_80plus = tranche in ["81-85", "86-90", "91-95"]
-        if is_80plus:
-            cell.set_facecolor("#FFF3E6")
-            cell.set_text_props(color=TEXT, fontweight="bold")
-        elif row % 2 == 0:
-            cell.set_facecolor("#F0F4F8")
-            cell.set_text_props(color=TEXT)
-        else:
-            cell.set_facecolor("white")
-            cell.set_text_props(color=TEXT)
+        grp = rows[row-1][1] if row <= len(rows) else ""
+        cell.set_facecolor(grp_colors.get(grp, "white"))
+        cell.set_text_props(color=TEXT)
+        if row <= 3:
+            cell.set_text_props(fontweight="bold")
+    if col == 8 and row > 0:
+        cell.set_text_props(fontsize=7.5, ha="left")
+        cell._loc = "left"
 
-fig_tab.suptitle("Tableau récapitulatif du CT par tranche d'âge conducteur",
-                 fontsize=15, fontweight="bold", color=NAVY, y=0.96)
-fig_tab.text(0.5, 0.04,
-    "Lignes orangées = tranches 80+ ans · CT agrégé = Σ Prime Ptf / Σ Prime AN · "
-    "Skewness > 0 = queue droite (quelques CT très élevés) · Kurtosis élevé = queues lourdes",
-    ha="center", fontsize=8.5, color=SUBTLE, style="italic")
+fig_tab.suptitle(
+    f"Ranking final CatBoost — Consensus 4 méthodes  |  "
+    f"R² = {r2:.4f}  |  MAE = {mae:.5f}",
+    fontsize=15, fontweight="bold", color=NAVY, y=0.97)
+fig_tab.text(0.5, 0.03,
+    "Bleu = tarifaire · Orange = comportemental · Vert = interaction · "
+    "Top 3 en gras = drivers principaux du CT",
+    ha="center", fontsize=9, color=SUBTLE, style="italic")
 
-plt.savefig("/mnt/user-data/outputs/tableau_recap_ct_age.png", dpi=200, bbox_inches="tight")
+plt.savefig(f"{OUTPUT_DIR}/catboost_ranking_final.png", dpi=200, bbox_inches="tight")
 plt.close()
-print("\nOK  tableau_recap_ct_age.png")
+print("OK  catboost_ranking_final.png")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4. FIGURE 2 : FOCUS 80+ — 4 CADRANS
+# 11. RÉSUMÉ FINAL
 # ══════════════════════════════════════════════════════════════════════════════
-df_80 = df[df["age_conducteur"] >= 80].copy()
-df_young = df[df["age_conducteur"] < 80].copy()
-
-fig, axes = plt.subplots(2, 2, figsize=(18, 12), facecolor=BG,
-                          gridspec_kw={"hspace": 0.35, "wspace": 0.28})
-
-# ──────────────────────────────────────────────────────────────────────────────
-# A. VIOLIN 80+ vs <80 (haut gauche)
-# ──────────────────────────────────────────────────────────────────────────────
-ax = axes[0, 0]
-ax.set_facecolor(BG)
-
-data_groups = [df_young["ct"].values, df_80["ct"].values]
-labels_grp = ["< 80 ans", "≥ 80 ans"]
-colors_grp = [MID_BLUE, RED]
-
-parts = ax.violinplot(data_groups, positions=[0, 1],
-                       showmedians=False, showextrema=False, widths=0.65)
-for i, body in enumerate(parts["bodies"]):
-    body.set_facecolor(colors_grp[i])
-    body.set_edgecolor(NAVY)
-    body.set_alpha(0.3)
-
-for i, d in enumerate(data_groups):
-    q1, med, q3 = np.percentile(d, [25, 50, 75])
-    p10, p90 = np.percentile(d, [10, 90])
-    ax.vlines(i, p10, p90, color=NAVY, linewidth=1.5, zorder=4)
-    ax.vlines(i, q1, q3, color=NAVY, linewidth=5, zorder=5)
-    ax.scatter(i, med, color="white", edgecolors=NAVY, s=40, zorder=6, linewidth=1.2)
-    ax.text(i + 0.35, med, f"med={med:.3f}", fontsize=8, color=TEXT, va="center")
-    ax.text(i + 0.35, q3, f"Q3={q3:.3f}", fontsize=7, color=SUBTLE, va="center")
-
-ct_young = df_young["prime_ptf"].sum() / df_young["prime_an"].sum()
-ct_old = df_80["prime_ptf"].sum() / df_80["prime_an"].sum()
-ax.scatter([0, 1], [ct_young, ct_old], marker="D", s=70, color=WARN,
-           edgecolors="white", linewidth=1.2, zorder=7)
-ax.text(0.35, ct_young, f"CT agg={ct_young:.3f}", fontsize=8, color=WARN, fontweight="bold")
-ax.text(1.35, ct_old, f"CT agg={ct_old:.3f}", fontsize=8, color=WARN, fontweight="bold")
-
-ax.axhline(1.0, color=SKY, linewidth=1.5, linestyle="--", alpha=0.6, zorder=2)
-ax.set_xticks([0, 1])
-ax.set_xticklabels(labels_grp, fontsize=11, color=NAVY, fontweight="bold")
-ax.set_ylabel("CT individuel", fontsize=11, color=TEXT, labelpad=8)
-ax.set_title("Distribution CT : < 80 vs ≥ 80 ans", fontsize=12,
-              fontweight="bold", color=NAVY, pad=10)
-ax.tick_params(axis="y", labelsize=9, colors=TEXT)
-ax.grid(False)
-for sp in ax.spines.values():
-    sp.set_visible(False)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# B. COURBE DE LORENZ — CONCENTRATION DU CT (haut droit)
-# ──────────────────────────────────────────────────────────────────────────────
-ax = axes[0, 1]
-ax.set_facecolor(BG)
-
-def lorenz_curve(ct_vals, prime_an_vals):
-    """Lorenz du CT : % cumulé de contrats vs % cumulé de surprime."""
-    surprime = prime_an_vals * (ct_vals - 1)  # surprime = prime_ptf - prime_an
-    idx = np.argsort(ct_vals)
-    surprime_sorted = surprime[idx]
-    cum_contrats = np.arange(1, len(ct_vals)+1) / len(ct_vals)
-    cum_surprime = np.cumsum(surprime_sorted) / surprime_sorted.sum()
-    return cum_contrats, cum_surprime
-
-# Lorenz 80+
-lx_old, ly_old = lorenz_curve(df_80["ct"].values, df_80["prime_an"].values)
-lx_young, ly_young = lorenz_curve(df_young["ct"].values, df_young["prime_an"].values)
-
-ax.plot(lx_old, ly_old, color=RED, linewidth=2.5, label="≥ 80 ans", zorder=4)
-ax.plot(lx_young, ly_young, color=MID_BLUE, linewidth=2, label="< 80 ans",
-        alpha=0.7, zorder=3)
-ax.plot([0, 1], [0, 1], color=SUBTLE, linewidth=1, linestyle="--", zorder=2,
-        label="Égalité parfaite")
-
-ax.fill_between(lx_old, lx_old, ly_old, color=RED, alpha=0.08)
-
-# Gini approx
-gini_old = np.trapz(lx_old - ly_old, lx_old) / np.trapz(lx_old, lx_old)
-gini_young = np.trapz(lx_young - ly_young, lx_young) / np.trapz(lx_young, lx_young)
-
-ax.text(0.55, 0.15, f"Gini 80+ = {gini_old:.3f}\nGini <80 = {gini_young:.3f}",
-        fontsize=10, color=TEXT, fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.5", facecolor="white", edgecolor="#D6E2ED"))
-
-ax.set_xlabel("% cumulé de contrats (triés par CT croissant)", fontsize=10, color=TEXT)
-ax.set_ylabel("% cumulé de la surprime (prime ptf − prime an)", fontsize=10, color=TEXT)
-ax.set_title("Courbe de Lorenz — Concentration de la surprime",
-              fontsize=12, fontweight="bold", color=NAVY, pad=10)
-ax.legend(fontsize=9.5, loc="upper left", frameon=True, fancybox=True,
-          edgecolor="#D6E2ED", facecolor="white")
-ax.tick_params(labelsize=9, colors=TEXT)
-ax.set_xlim(0, 1); ax.set_ylim(0, 1)
-ax.grid(False)
-for sp in ax.spines.values():
-    sp.set_visible(False)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# C. HEATMAP CT × ÂGE × ANCIENNETÉ pour 80+ (bas gauche)
-# ──────────────────────────────────────────────────────────────────────────────
-ax = axes[1, 0]
-ax.set_facecolor(BG)
-
-df_80["anc_bin"] = pd.cut(df_80["anciennete"], bins=[-1, 3, 7, 12, 18, 25],
-                           labels=["0-3", "4-7", "8-12", "13-18", "19-25"])
-
-pivot = df_80.groupby(["age_conducteur", "anc_bin"], observed=True).apply(
-    lambda g: g["prime_ptf"].sum() / g["prime_an"].sum() if len(g) > 10 else np.nan
-).unstack()
-
-im = ax.imshow(pivot.values, cmap="RdYlBu_r", aspect="auto",
-               vmin=1.05, vmax=1.45)
-ax.set_xticks(range(len(pivot.columns)))
-ax.set_xticklabels(pivot.columns, fontsize=9, color=TEXT)
-ax.set_yticks(range(len(pivot.index)))
-ax.set_yticklabels(pivot.index, fontsize=8, color=TEXT)
-ax.set_xlabel("Ancienneté (tranche)", fontsize=11, color=TEXT, labelpad=8)
-ax.set_ylabel("Âge conducteur", fontsize=11, color=TEXT, labelpad=8)
-ax.set_title("Heatmap CT — Âge × Ancienneté (80+ ans)",
-              fontsize=12, fontweight="bold", color=NAVY, pad=10)
-
-# Valeurs dans les cellules
-for i in range(pivot.shape[0]):
-    for j in range(pivot.shape[1]):
-        val = pivot.values[i, j]
-        if not np.isnan(val):
-            color_txt = "white" if val > 1.30 else TEXT
-            ax.text(j, i, f"{val:.3f}", ha="center", va="center",
-                    fontsize=7.5, color=color_txt, fontweight="bold")
-
-cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.04)
-cbar.set_label("CT agrégé", fontsize=9, color=TEXT)
-cbar.ax.tick_params(labelsize=8, colors=TEXT)
-
-for sp in ax.spines.values():
-    sp.set_visible(False)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# D. DENSITÉ COMPARATIVE (bas droit)
-# ──────────────────────────────────────────────────────────────────────────────
-ax = axes[1, 1]
-ax.set_facecolor(BG)
-
-# KDE
-from scipy.stats import gaussian_kde
-
-x_range = np.linspace(0.85, 1.55, 500)
-kde_old = gaussian_kde(df_80["ct"], bw_method=0.15)
-kde_young = gaussian_kde(df_young["ct"], bw_method=0.15)
-
-ax.fill_between(x_range, kde_old(x_range), color=RED, alpha=0.15, zorder=2)
-ax.plot(x_range, kde_old(x_range), color=RED, linewidth=2.5, label="≥ 80 ans", zorder=4)
-
-ax.fill_between(x_range, kde_young(x_range), color=MID_BLUE, alpha=0.1, zorder=1)
-ax.plot(x_range, kde_young(x_range), color=MID_BLUE, linewidth=2, alpha=0.8,
-        label="< 80 ans", zorder=3)
-
-ax.axvline(ct_old, color=RED, linewidth=1.5, linestyle="--", alpha=0.7)
-ax.axvline(ct_young, color=MID_BLUE, linewidth=1.5, linestyle="--", alpha=0.7)
-ax.axvline(1.0, color=SKY, linewidth=1.5, linestyle="--", alpha=0.5)
-
-ax.text(ct_old + 0.01, ax.get_ylim()[1]*0.85 if ax.get_ylim()[1] > 0 else 5,
-        f"CT agg 80+ = {ct_old:.3f}", fontsize=9, color=RED, fontweight="bold",
-        rotation=90, va="top")
-ax.text(ct_young + 0.01, ax.get_ylim()[1]*0.85 if ax.get_ylim()[1] > 0 else 5,
-        f"CT agg <80 = {ct_young:.3f}", fontsize=9, color=MID_BLUE, fontweight="bold",
-        rotation=90, va="top")
-
-# Zone de surprime excessive (CT > P90 des 80+)
-p90_old = df_80["ct"].quantile(0.90)
-ax.axvspan(p90_old, 1.55, color=RED, alpha=0.05, zorder=0)
-ax.text(p90_old + 0.01, kde_old(np.array([p90_old]))[0],
-        f"P90 = {p90_old:.3f}\nQueue à risque →",
-        fontsize=8, color=RED, style="italic")
-
-ax.set_xlabel("CT individuel", fontsize=11, color=TEXT, labelpad=8)
-ax.set_ylabel("Densité", fontsize=11, color=TEXT, labelpad=8)
-ax.set_title("Densité KDE comparative du CT",
-              fontsize=12, fontweight="bold", color=NAVY, pad=10)
-ax.legend(fontsize=10, loc="upper right", frameon=True, fancybox=True,
-          edgecolor="#D6E2ED", facecolor="white")
-ax.tick_params(labelsize=9, colors=TEXT)
-ax.grid(False)
-for sp in ax.spines.values():
-    sp.set_visible(False)
-
-# ── Global ────────────────────────────────────────────────────────────────────
-fig.suptitle("Focus conducteurs ≥ 80 ans — Analyse de la dispersion du CT",
-             fontsize=17, fontweight="bold", color=NAVY, y=0.99)
-
-ecart = ct_old - ct_young
-fig.text(0.5, 0.005,
-    f"Écart CT agrégé : 80+ ({ct_old:.4f}) vs <80 ({ct_young:.4f}) = +{ecart:.4f} "
-    f"(+{ecart/ct_young:.1%}) · Gini 80+ = {gini_old:.3f} vs <80 = {gini_young:.3f}",
-    ha="center", fontsize=9.5, color=NAVY, fontweight="bold",
-    bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor="#D6E2ED"))
-
-plt.savefig("/mnt/user-data/outputs/focus_80plus.png", dpi=200, bbox_inches="tight")
-plt.close()
-print("OK  focus_80plus.png")
-
-print("\n✅ Terminé.")
+print(f"\n{'='*70}")
+print(f"  ✅  PIPELINE TERMINÉ — 5 VISUELS GÉNÉRÉS")
+print(f"{'='*70}")
+print(f"  1. catboost_importance_4methods.png  — 4 méthodes comparées")
+print(f"  2. catboost_shap_summary.png        — Beeswarm SHAP")
+print(f"  3. catboost_shap_dependence.png      — PDP top 6 variables")
+print(f"  4. catboost_shap_interaction.png     — Interaction top 2")
+print(f"  5. catboost_ranking_final.png        — Tableau ranking")
+print(f"{'='*70}")
+print(f"  Performance : R² = {r2:.4f} | MAE = {mae:.5f} | RMSE = {rmse:.5f}")
+print(f"  Top 3 drivers : {', '.join(imp.head(3)['label_fr'].tolist())}")
+print(f"{'='*70}")
