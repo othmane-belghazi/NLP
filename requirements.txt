@@ -1,28 +1,34 @@
+**Tableau : Simulation de recalibrage du CT à 1.25 pour les segments 80+ ans avec CT > 1.25**
 
----
+**Colonnes du tableau :**
 
-### **📌 Contenu du fichier `requirements.txt`**
-Ce fichier liste toutes les bibliothèques Python nécessaires.
+- Tranche d'âge (81-85, 86-90, 91-95)
+- Nb contrats concernés
+- Σ Prime AN actuelle
+- CT actuel (agrégé)
+- Σ Prime Ptf actuelle (= Σ Prime AN × CT actuel)
+- CT cible (1.25)
+- Σ Prime Ptf cible (= Σ Prime AN × 1.25)
+- Perte en € (= Σ Prime Ptf actuelle − Σ Prime Ptf cible)
+- Perte en % du CA HT total portefeuille (= Perte / Σ Prime Ptf totale × 100)
+- Dernière ligne TOTAL qui somme les pertes
 
-```txt
-langchain
-langchain-community
-langchain-huggingface
-langchain-chroma
-langchain-google-genai
-google-generativeai
-chromadb
-sentence-transformers
-pypdf
+**Calculs détaillés :**
 
+Pour chaque tranche d'âge *i* où CT > 1.25 :
 
-Titre : Analyse du Coefficient Tarifaire Moyen du Portefeuille Auto
-Sous-titre : Étude de la dispersion et des drivers du CT par variable de segmentation — Bilan trimestriel 2025
-Objectif de l'étude :
-Mesurer l'écart entre la tarification du portefeuille existant et celle des affaires nouvelles à travers le coefficient tarifaire (CT)
-Identifier les segments à forte pression tarifaire (CT élevé → risque de résiliation) et les segments sous-tarifés (CT bas → manque à gagner)
-Quantifier les drivers qui influencent le CT pour orienter la stratégie de révision tarifaire
-Définitions clés :
-CT agrégé (par segment) : rapport entre la somme des primes portefeuille et la somme des primes affaires nouvelles du segment. CT = Σ Prime Ptf / Σ Prime AN. C'est la métrique officielle — elle reflète le poids économique réel de chaque contrat dans le calcul. Un CT agrégé de 1.20 signifie que le portefeuille paie en moyenne 20% de plus que ce que paierait un nouveau client pour le même profil de risque.
-CT moyen (individuel) : moyenne arithmétique des CT contrat par contrat au sein du segment. Chaque contrat pèse le même poids, qu'il ait une prime de 150€ ou de 1 200€. Utile pour analyser la distribution statistique (violin, écart-type) mais ne reflète pas la réalité économique du portefeuille.
-Écart entre les deux : quand le CT agrégé est supérieur au CT moyen, cela signifie que les contrats à prime élevée ont un CT plus fort — les gros contrats subissent plus de pression tarifaire.
+- Perte_i = Σ Prime AN_i × (CT_actuel_i − 1.25)
+- Ce qui revient à : Perte_i = Σ Prime Ptf_actuelle_i − Σ Prime AN_i × 1.25
+- % CA total = Perte_i / Σ Prime Ptf totale portefeuille × 100
+
+La perte totale = Σ des pertes sur toutes les tranches concernées.
+
+**Interprétation :** ce tableau te donne le coût du recalibrage en euros et en points de CA. Si la perte représente par exemple 0.3% du CA HT total, c'est un arbitrage tenable pour réduire le risque de résiliation sur les 80+. Si c'est 2%, il faut envisager un recalibrage progressif (par exemple ramener à 1.28 en année 1 puis 1.25 en année 2).
+
+**Indicateurs complémentaires à ajouter :**
+
+- Taux de résiliation actuel de la tranche vs reste du portefeuille — pour estimer combien de contrats tu "sauves" en baissant le CT
+- Gain estimé en rétention : nombre de contrats retenus × prime AN moyenne × durée de vie résiduelle estimée
+- ROI du recalibrage = gain rétention / perte de prime, pour voir si le recalibrage est rentable net
+
+Ça transforme ton tableau d'un simple chiffrage de coût en un vrai business case.
