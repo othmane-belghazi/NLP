@@ -1,0 +1,125 @@
+flowchart TD
+    %% ============================================================
+    %% PROCESS TAB MOTO
+    %% ============================================================
+
+    Start([🏁 Début Process TAB Moto]) --> S1
+
+    %% ── ÉTAPE 1 : MISE À JOUR DES ELR ─────────────────────────
+    subgraph S1["1️⃣ Mise à jour des ELR"]
+        direction TB
+        A1[Récupérer fichier ELR\ndepuis SharePoint]
+        A1 -->|"📎 Lien SharePoint : ___"| A2[Copier fichier Excel dans\nDatabricks Lab ➜ Catalog ➜\nBrowse DBFS ➜ Stores ➜ Table]
+        A2 --> A3[Ouvrir notebook dédié]
+        A3 -->|"📎 Lien Notebook : ___"| A4[Créer dossier & vérifier\nprésence dossier + fichier ELR]
+        A4 --> A1_NOTE[/⚠️ Note : ELR du mois M\ndoit être au moins M+3/]
+    end
+
+    S1 --> S2
+
+    %% ── ÉTAPE 2 : CRÉER SOUS-DOSSIER ──────────────────────────
+    subgraph S2["2️⃣ Créer sous-dossier dédié au TAB"]
+        direction TB
+        B1[Créer sous-dossier dans\nle répertoire cible]
+        B1 -->|"📎 Répertoire : ___"| B2[Respecter le format\nde nommage défini]
+        B2 -->|"📎 Format : ___"| B2
+    end
+
+    S2 --> S3
+
+    %% ── ÉTAPE 3 : DATA QUALITY ─────────────────────────────────
+    subgraph S3["3️⃣ Vérifier Data Quality"]
+        direction TB
+        C1{Méthode de\nvérification ?}
+        C1 -->|Option A| C2[Notebook contrôle Data]
+        C2 -->|"📎 Lien Notebook : ___"| C4[✅ Data Quality OK]
+        C1 -->|Option B| C3[Reporting Power BI\nData Quality]
+        C3 -->|"📎 Lien Power BI : ___"| C4
+    end
+
+    S3 --> S4
+
+    %% ── ÉTAPE 4 : MISE À JOUR MOTEUR ──────────────────────────
+    subgraph S4["4️⃣ Mise à jour Moteur"]
+        direction TB
+        D1[Récupérer dernier fichier\nMajo Fraude depuis SharePoint]
+        D1 -->|"📎 Lien SharePoint : ___"| D2[Copier fichier dans\nrépertoire du TAB concerné]
+        D2 --> D3[Dans dossier Ressources :\nimporter Majo Fraude\n& modifier nom base dans df_top]
+        D3 --> D4[Mettre à jour constant.py\n➜ ressource cible selon distributeur]
+        D4 -->|"📎 Lien fichier ressource : ___"| D4_NOTE[/⚠️ Ajouter +0.02 à la ressource\npour éviter écarts/]
+        D4_NOTE --> D5[Mettre à jour version.py\nà chaque modification]
+        D5 --> D6[Push code sur Azure DevOps]
+        D6 -->|"📎 Lien Repo : ___"| D7{Pipeline\nAzure DevOps}
+        D7 -->|❌ Failed| D6
+        D7 -->|✅ Succeeded| D7_OK[Passer à étape suivante]
+    end
+
+    S4 --> S5
+
+    %% ── ÉTAPE 5 : SIMULATION & CONTRÔLE ───────────────────────
+    subgraph S5["5️⃣ Lancer Simulation & Contrôle"]
+        direction TB
+        E1[Ouvrir notebook Simulation]
+        E1 -->|"📎 Lien Notebook : ___"| E2[Run with different parameters :\n• Date\n• Mois\n• Year]
+        E2 --> E3[Revérifier paramètres\npuis Lancer]
+        E3 --> E4[Contrôler résultats via\n4 notebooks :]
+
+        E4 --> E4a[📊 Globale]
+        E4 --> E4b[📊 Agents]
+        E4 --> E4c[📊 Courtiers]
+        E4 --> E4d[📊 Doatm]
+
+        E4a --> E5{Contrôle OK ?\n• Pas de rejet\n• Ressource cible atteinte\n• Shift ∈ entre 0 et 1}
+        E4b --> E5
+        E4c --> E5
+        E4d --> E5
+
+        E5 -->|"✅ Scénario 1 :\nRessource OK & Shift OK"| E_OK[Sauvegarder notebooks\ndans répertoire TAB]
+
+        E5 -->|"❌ Scénario 2 :\nRessource KO ou Shift hors bornes"| E6[Ouvrir fichier Excel\nde calibration]
+        E6 -->|"📎 Lien Excel : ___"| E7[Modifier coefficients a, b\nsur segment choisi]
+        E7 --> E8[Mettre à jour constant.py\navec nouveaux coefficients]
+        E8 --> E2
+    end
+
+    S5 --> S6
+
+    %% ── ÉTAPE 6 : EXPORT & VALIDATION ─────────────────────────
+    subgraph S6["6️⃣ Export & Validation"]
+        direction TB
+        F1[Exporter fichier Mainframe]
+        F1 -->|"📎 Lien Export : ___"| F2[IT récupère fichier\nJeudi & Vendredi à 16h / 20h]
+        F2 --> F3[Réception échantillon IT\nle lendemain matin]
+        F3 --> F4[Copier fichier IT reçu\ndans répertoire TAB]
+        F4 --> F5[Charger fichier dans\nFilestore ➜ Tables\ndans Lab Databricks]
+        F5 --> F6[Modifier paramètres du Job]
+        F6 -->|"📎 Lien Job : ___"| F7[Lancer le Job]
+        F7 --> F8{Vérification résultats :\n• Prime toujours positive\n• Contrôle non null\n• Cohérence globale}
+        F8 -->|✅ OK| F9[Sauvegarder notebook\ndans répertoire TAB]
+        F8 -->|❌ KO| F6
+    end
+
+    S6 --> S7
+
+    %% ── ÉTAPE 7 : TAB 2 ───────────────────────────────────────
+    subgraph S7["7️⃣ TAB 2 — Même process + spécificités"]
+        direction TB
+        G1[Reprendre le process\nétapes 1 à 6 pour TAB 2]
+        G1 --> G2[Ajouter date de data\nutilisée pour TAB 2\ndans fichier Excel]
+        G2 -->|"📎 Lien Excel : ___"| G3[Après validation :\nlancer notebook\nTransfert Simulation]
+        G3 -->|"📎 Lien Notebook : ___"| G4[Décommenter\nl'échéance concernée]
+        G4 --> G_END([🏁 Fin du Process])
+    end
+
+    %% ── STYLES ─────────────────────────────────────────────────
+    classDef stepBox fill:#1e3a5f,stroke:#4a90d9,color:#ffffff,stroke-width:2px
+    classDef decision fill:#f5a623,stroke:#d4891a,color:#1a1a1a,stroke-width:2px
+    classDef note fill:#fff3cd,stroke:#d4a017,color:#665000,stroke-width:1px
+    classDef ok fill:#28a745,stroke:#1e7e34,color:#ffffff,stroke-width:2px
+    classDef terminal fill:#6c5ce7,stroke:#5a4bd1,color:#ffffff,stroke-width:2px
+
+    class A1,A2,A3,A4,B1,B2,C2,C3,C4,D1,D2,D3,D4,D5,D6,D7_OK,E1,E2,E3,E4,E4a,E4b,E4c,E4d,E6,E7,E8,F1,F2,F3,F4,F5,F6,F7,F9,G1,G2,G3,G4 stepBox
+    class C1,D7,E5,F8 decision
+    class A1_NOTE,D4_NOTE note
+    class E_OK ok
+    class Start,G_END terminal
