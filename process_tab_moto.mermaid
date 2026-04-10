@@ -1,0 +1,199 @@
+%% ╔══════════════════════════════════════════════════════════════════════════════════════╗
+%% ║  PROCESS TAB MOTO                                                                  ║
+%% ║                                                                                     ║
+%% ║  CONTRÔLE LARGEUR DES BLOCS DÉTAIL :                                                ║
+%% ║  La largeur d un bloc est définie par sa ligne de texte la plus longue.              ║
+%% ║  Pour élargir  : ajouter des espaces en fin de ligne ou écrire des phrases           ║
+%% ║                   plus longues dans le bloc.                                         ║
+%% ║  Pour rétrécir : raccourcir les phrases ou passer à la ligne plus tôt.               ║
+%% ║                                                                                     ║
+%% ║  CONTRÔLE HAUTEUR DES BLOCS DÉTAIL :                                                ║
+%% ║  La hauteur dépend du nombre de lignes dans le bloc.                                ║
+%% ║  Pour agrandir : ajouter des lignes de texte.                                       ║
+%% ║  Pour réduire  : supprimer des lignes ou regrouper le texte.                        ║
+%% ║                                                                                     ║
+%% ║  LIENS CLIQUABLES :                                                                 ║
+%% ║  Les liens sont définis en bas du fichier avec la syntaxe click.                     ║
+%% ║  Chercher la section LIENS CLIQUABLES et remplacer les URL ______ par vos liens.     ║
+%% ║  Chaque lien est rattaché à un noeud identifié par L1a, L1b, L3a, etc.              ║
+%% ╚══════════════════════════════════════════════════════════════════════════════════════╝
+
+flowchart TD
+    Start([🏁 PROCESS TAB MOTO]) --> S1
+
+    %% ═══════════════════════════════════════════════════
+    %% COLONNE GAUCHE : FLOWCHART SIMPLIFIÉ
+    %% ═══════════════════════════════════════════════════
+
+    S1[1 - Mise à jour des ELR]
+    S1 --> S2
+    S2[2 - Créer sous-dossier TAB]
+    S2 --> S3
+    S3{3 - Vérifier Data Quality}
+    S3 -->|OK| S4
+    S4[4 - Mise à jour Moteur]
+    S4 --> S4_CI{Pipeline Azure DevOps}
+    S4_CI -->|Failed| S4
+    S4_CI -->|Succeeded| S5
+    S5[5 - Lancer Simulation]
+    S5 --> S5_CTL{Contrôle résultats}
+    S5_CTL -->|"Scénario 1 : OK"| S6
+    S5_CTL -->|"Scénario 2 : KO"| S5_CAL[Calibrer coeff a,b]
+    S5_CAL --> S4
+    S6[6 - Export et Validation IT]
+    S6 --> S6_VAL{Validation échantillon}
+    S6_VAL -->|OK| S7
+    S6_VAL -->|KO| S6
+    S7[7 - TAB 2 : même process + spécificités]
+    S7 --> Fin([🏁 FIN])
+
+    %% ═══════════════════════════════════════════════════
+    %% COLONNE DROITE : PANNEAUX DÉTAILS
+    %% Largeur = longueur de la ligne la plus longue
+    %% Hauteur = nombre de lignes dans le bloc
+    %% ═══════════════════════════════════════════════════
+
+    D1["
+    ━━━━━━━━━━━━━━━━━━━━  DÉTAIL ÉTAPE 1 : Mise à jour des ELR  ━━━━━━━━━━━━━━━━━━━━
+    • Aller sur SharePoint et récupérer le fichier ELR déposé par l équipe concernée
+    • Copier ce fichier Excel dans Databricks : Lab → Catalog → Browse DBFS → Stores → Table
+    • Ouvrir le notebook dédié pour créer le dossier et vérifier que le dossier et le fichier ELR sont bien présents
+    • ⚠ Attention : les ELR du mois M doivent couvrir au minimum jusqu à M+3 pour être exploitables
+    "]
+    L1a([📎 SharePoint ELR])
+    L1b([📎 Notebook ELR])
+
+    D2["
+    ━━━━━━━━━━━━━━━━━━━━  DÉTAIL ÉTAPE 2 : Créer sous-dossier  ━━━━━━━━━━━━━━━━━━━━━
+    • Créer un sous-dossier dédié au TAB dans le répertoire partagé de l équipe
+    • Respecter strictement le format de nommage défini pour garantir la traçabilité
+    "]
+    L2a([📎 Répertoire cible])
+
+    D3["
+    ━━━━━━━━━━━━━━━━━━━━  DÉTAIL ÉTAPE 3 : Data Quality  ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    • Option A : Ouvrir le notebook de contrôle data et exécuter les vérifications automatiques
+    • Option B : Consulter le reporting Power BI Data Quality pour visualiser les anomalies éventuelles
+    • S assurer que toutes les données nécessaires sont complètes et cohérentes avant de continuer
+    "]
+    L3a([📎 Notebook contrôle])
+    L3b([📎 Power BI DQ])
+
+    D4["
+    ━━━━━━━━━━━━━━━━━━━━  DÉTAIL ÉTAPE 4 : Mise à jour Moteur  ━━━━━━━━━━━━━━━━━━━━━
+    • Récupérer la dernière version du fichier Majo Fraude depuis SharePoint
+    • Copier ce fichier dans le répertoire créé à l étape 2 pour le TAB concerné
+    • Dans le dossier Ressources du moteur, importer le fichier Majo Fraude
+    • Modifier le nom de la base importée dans df_top du moteur pour pointer vers ce fichier
+    • Mettre à jour le fichier constant.py : définir la ressource cible selon le distributeur de l échéance
+    • ⚠ Ajouter une marge de +0.02 à la ressource cible pour éviter les problèmes d écarts
+    • Mettre à jour le fichier version.py à chaque modification effectuée sur le moteur
+    • Push le code sur Azure DevOps et attendre que la pipeline affiche le statut Succeeded
+    "]
+    L4a([📎 SharePoint Majo Fraude])
+    L4b([📎 Fichier ressource cible])
+    L4c([📎 Repo Azure DevOps])
+
+    D5["
+    ━━━━━━━━━━━━━━━━━━━━  DÉTAIL ÉTAPE 5 : Simulation et Contrôle  ━━━━━━━━━━━━━━━━━
+    • Ouvrir le notebook de simulation et cliquer sur Run with different parameters
+    • Renseigner les paramètres : Date, Mois, Year puis vérifier avant de lancer
+    • Une fois terminé, contrôler les résultats via les 4 notebooks : Globale, Agents, Courtiers, Doatm
+    • Vérifier qu il n y a aucun rejet, que la ressource cible est atteinte et que le shift est entre 0 et 1
+    •
+    • Scénario 1 : ressource cible atteinte et shift correct → sauvegarder et passer à l étape suivante
+    • Scénario 2 : ressource non atteinte ou shift hors bornes 0-1 :
+    •   → Ouvrir le fichier Excel de calibration et modifier les coefficients a, b sur le segment choisi
+    •   → Récupérer les bons coefficients par distributeur et segment, les reporter dans constant.py
+    •   → Relancer la simulation et refaire le contrôle jusqu à validation
+    • Sauvegarder tous les notebooks de contrôle dans le répertoire dédié au TAB
+    "]
+    L5a([📎 Notebook simulation])
+    L5b([📎 Excel calibration])
+
+    D6["
+    ━━━━━━━━━━━━━━━━━━━━  DÉTAIL ÉTAPE 6 : Export et Validation  ━━━━━━━━━━━━━━━━━━━━
+    • Lancer l export du fichier Mainframe via le lien dédié
+    • L IT récupère ce fichier automatiquement chaque Jeudi et Vendredi à 16h et 20h
+    • Le lendemain matin, l IT envoie un échantillon pour validation de cohérence
+    •
+    • Validation du TAB :
+    • Copier le fichier reçu par l IT dans le répertoire créé pour ce TAB
+    • Charger le fichier dans Databricks : FileStore → Tables
+    • Modifier les paramètres du Job de validation puis le lancer
+    • Vérifier les résultats : prime toujours positive, contrôles non null, cohérence globale
+    • Une fois vérifié, sauvegarder le notebook dans le répertoire du TAB
+    "]
+    L6a([📎 Export Mainframe])
+    L6b([📎 Job validation])
+
+    D7["
+    ━━━━━━━━━━━━━━━━━━━━  DÉTAIL ÉTAPE 7 : TAB 2 spécificités  ━━━━━━━━━━━━━━━━━━━━━
+    • Reprendre exactement le même process que TAB 1 de l étape 1 à l étape 6
+    • En plus : ajouter la date de data utilisée pour TAB 2 dans le fichier Excel dédié
+    • Après validation complète, lancer le notebook Transfert Simulation
+    • Dans ce notebook, décommenter la ligne correspondant à l échéance concernée
+    "]
+    L7a([📎 Excel date data TAB2])
+    L7b([📎 Notebook Transfert Simulation])
+
+    %% ── LIAISON INVISIBLE : PLACE LES DÉTAILS À DROITE ────────
+    S1 ~~~ D1
+    S2 ~~~ D2
+    S3 ~~~ D3
+    S4 ~~~ D4
+    S5 ~~~ D5
+    S6 ~~~ D6
+    S7 ~~~ D7
+
+    %% ── LIAISON INVISIBLE : LIENS SOUS CHAQUE DÉTAIL ──────────
+    D1 ~~~ L1a
+    D1 ~~~ L1b
+    D2 ~~~ L2a
+    D3 ~~~ L3a
+    D3 ~~~ L3b
+    D4 ~~~ L4a
+    D4 ~~~ L4b
+    D4 ~~~ L4c
+    D5 ~~~ L5a
+    D5 ~~~ L5b
+    D6 ~~~ L6a
+    D6 ~~~ L6b
+    D7 ~~~ L7a
+    D7 ~~~ L7b
+
+    %% ═══════════════════════════════════════════════════
+    %% STYLES
+    %% ═══════════════════════════════════════════════════
+    classDef step fill:#1e3a5f,stroke:#4a90d9,color:#fff,stroke-width:2px,font-weight:bold
+    classDef decision fill:#f5a623,stroke:#d4891a,color:#1a1a1a,stroke-width:2px,font-weight:bold
+    classDef detail fill:#f0f4f8,stroke:#607d8b,color:#263238,stroke-width:1.5px,text-align:left
+    classDef linkNode fill:#e3f2fd,stroke:#1976d2,color:#0d47a1,stroke-width:1.5px
+    classDef calibrer fill:#e74c3c,stroke:#c0392b,color:#fff,stroke-width:2px
+    classDef terminal fill:#6c5ce7,stroke:#5a4bd1,color:#fff,stroke-width:2px
+
+    class S1,S2,S4,S5,S6,S7 step
+    class S3,S4_CI,S5_CTL,S6_VAL decision
+    class D1,D2,D3,D4,D5,D6,D7 detail
+    class L1a,L1b,L2a,L3a,L3b,L4a,L4b,L4c,L5a,L5b,L6a,L6b,L7a,L7b linkNode
+    class S5_CAL calibrer
+    class Start,Fin terminal
+
+    %% ═══════════════════════════════════════════════════════════════════════
+    %% LIENS CLIQUABLES — REMPLACER ______ PAR VOS URLS
+    %% Syntaxe : click NomNoeud "URL" _blank
+    %% ═══════════════════════════════════════════════════════════════════════
+    click L1a "______" _blank
+    click L1b "______" _blank
+    click L2a "______" _blank
+    click L3a "______" _blank
+    click L3b "______" _blank
+    click L4a "______" _blank
+    click L4b "______" _blank
+    click L4c "______" _blank
+    click L5a "______" _blank
+    click L5b "______" _blank
+    click L6a "______" _blank
+    click L6b "______" _blank
+    click L7a "______" _blank
+    click L7b "______" _blank
