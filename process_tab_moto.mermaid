@@ -1,0 +1,156 @@
+flowchart TD
+    Start([🏁 PROCESS TAB MOTO]) --> S1
+
+    %% ── ÉTAPE 1 ────────────────────────────────────────────────
+    S1[1 - Mise à jour des ELR]
+    S1 --> S2
+
+    %% ── ÉTAPE 2 ────────────────────────────────────────────────
+    S2[2 - Créer sous-dossier TAB]
+    S2 --> S3
+
+    %% ── ÉTAPE 3 ────────────────────────────────────────────────
+    S3{3 - Vérifier Data Quality}
+    S3 -->|OK| S4
+
+    %% ── ÉTAPE 4 ────────────────────────────────────────────────
+    S4[4 - Mise à jour Moteur]
+    S4 --> S4_CI{Pipeline Azure DevOps}
+    S4_CI -->|Failed| S4
+    S4_CI -->|Succeeded| S5
+
+    %% ── ÉTAPE 5 ────────────────────────────────────────────────
+    S5[5 - Lancer Simulation]
+    S5 --> S5_CTL{Contrôle résultats}
+    S5_CTL -->|"Scénario 1 : OK"| S6
+    S5_CTL -->|"Scénario 2 : KO"| S5_CAL[Calibrer coeff a,b]
+    S5_CAL --> S4
+
+    %% ── ÉTAPE 6 ────────────────────────────────────────────────
+    S6[6 - Export et Validation IT]
+    S6 --> S6_VAL{Validation échantillon}
+    S6_VAL -->|OK| S7
+    S6_VAL -->|KO| S6
+
+    %% ── ÉTAPE 7 ────────────────────────────────────────────────
+    S7[7 - TAB 2 : même process + spécificités]
+    S7 --> Fin([🏁 FIN])
+
+    %% ════════════════════════════════════════════════════════════
+    %% PANNEAUX DÉTAILS À DROITE
+    %% ════════════════════════════════════════════════════════════
+
+    D1["
+    ━━ Détail étape 1 ━━
+    Récupérer ELR depuis SharePoint
+      LIEN : ______
+    Copier Excel dans Databricks
+      Lab > Catalog > Browse DBFS > Stores > Table
+    Notebook : créer dossier, vérifier présence
+      LIEN : ______
+    ⚠ ELR du mois M doit être au moins M+3
+    "]
+
+    D2["
+    ━━ Détail étape 2 ━━
+    Créer sous-dossier dans le répertoire
+      LIEN : ______
+    Respecter le format de nommage
+      FORMAT : ______
+    "]
+
+    D3["
+    ━━ Détail étape 3 ━━
+    Option A : Notebook contrôle data
+      LIEN : ______
+    Option B : Reporting Power BI Data Quality
+      LIEN : ______
+    "]
+
+    D4["
+    ━━ Détail étape 4 ━━
+    Récupérer Majo Fraude depuis SharePoint
+      LIEN : ______
+    Copier dans répertoire du TAB
+    Dossier Ressources : importer Majo Fraude
+      modifier nom base dans df_top
+    Mettre à jour constant.py
+      ressource cible selon distributeur
+      LIEN fichier ressource : ______
+      ⚠ Ajouter +0.02 pour éviter écarts
+    Mettre à jour version.py
+    Push sur Azure DevOps
+      LIEN repo : ______
+    Attendre status Succeeded
+    "]
+
+    D5["
+    ━━ Détail étape 5 ━━
+    Notebook simulation
+      LIEN : ______
+    Run with different parameters
+      Date / Mois / Year
+    Contrôle via 4 notebooks
+      Globale / Agents / Courtiers / Doatm
+    Vérifier : pas de rejet
+      ressource cible atteinte
+      shift entre 0 et 1
+
+    Scénario 1 : tout OK > étape suivante
+    Scénario 2 : KO > fichier Excel calibration
+      LIEN : ______
+      Modifier coeff a,b sur segment
+      Reporter dans constant.py et relancer
+
+    Sauvegarder notebooks dans répertoire TAB
+    "]
+
+    D6["
+    ━━ Détail étape 6 ━━
+    Export fichier Mainframe
+      LIEN : ______
+    IT récupère Jeu/Ven 16h et 20h
+    Réception échantillon le lendemain matin
+
+    Validation :
+    Copier fichier IT dans répertoire TAB
+    Charger dans FileStore > Tables Databricks
+    Modifier paramètres et lancer Job
+      LIEN Job : ______
+    Vérifier : prime positive
+      contrôle non null, cohérence
+    Sauvegarder notebook dans répertoire
+    "]
+
+    D7["
+    ━━ Détail étape 7 ━━
+    Même process que TAB 1 étapes 1 à 6
+    Ajouter date data TAB 2 dans Excel
+      LIEN : ______
+    Après validation : lancer notebook
+      Transfert Simulation
+      LIEN : ______
+    Décommenter l échéance concernée
+    "]
+
+    %% ── LIAISON INVISIBLE : PLACE LES DÉTAILS À DROITE ────────
+    S1 ~~~ D1
+    S2 ~~~ D2
+    S3 ~~~ D3
+    S4 ~~~ D4
+    S5 ~~~ D5
+    S6 ~~~ D6
+    S7 ~~~ D7
+
+    %% ── STYLES ─────────────────────────────────────────────────
+    classDef step fill:#1e3a5f,stroke:#4a90d9,color:#fff,stroke-width:2px,font-weight:bold
+    classDef decision fill:#f5a623,stroke:#d4891a,color:#1a1a1a,stroke-width:2px,font-weight:bold
+    classDef detail fill:#f0f4f8,stroke:#90a4ae,color:#263238,stroke-width:1px,text-align:left
+    classDef calibrer fill:#e74c3c,stroke:#c0392b,color:#fff,stroke-width:2px
+    classDef terminal fill:#6c5ce7,stroke:#5a4bd1,color:#fff,stroke-width:2px
+
+    class S1,S2,S4,S5,S6,S7 step
+    class S3,S4_CI,S5_CTL,S6_VAL decision
+    class D1,D2,D3,D4,D5,D6,D7 detail
+    class S5_CAL calibrer
+    class Start,Fin terminal
