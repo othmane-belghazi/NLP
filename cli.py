@@ -1,646 +1,322 @@
-# =============================================================================
-# ÉTUDE ACTUARIELLE — PRICE TEST | SEGMENT JEUNES CONDUCTEURS (< 30 ANS)
-# =============================================================================
-# Auteur  : Équipe Tarification
-# Objet   : Évaluation de l'impact du Price Test sur la rétention et la
-#           rentabilité du segment Jeunes Conducteurs (2022–2025)
-# =============================================================================
+"""
+==========================================================================
+ANALYSE COMPARATIVE DE DEUX VERSIONS TARIFAIRES
+==========================================================================
+Objectif : Mesurer l'impact d'un changement de moteur tarifaire sur :
+  - La prime totale (affaire nouvelle)
+  - Le prix de chaque garantie
+  - Le coefficient tarifaire (prime AN / prime payée actuellement)
 
-from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
-from pyspark.sql.window import Window
-from pyspark.sql.types import DoubleType
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-import matplotlib.ticker as mticker
+Approche : Data Science / Actuariat
+Palette  : bleu ciel + blanc (minimaliste)
+==========================================================================
+"""
+
 import numpy as np
 import pandas as pd
-import warnings
-warnings.filterwarnings("ignore")
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.ticker import PercentFormatter
 
-# ---------------------------------------------------------------------------
-# 0. INITIALISATION SPARK
-# ---------------------------------------------------------------------------
-spark = SparkSession.builder \
-    .appName("PriceTest_JeunesConduct") \
-    .config("spark.sql.legacy.timeParserPolicy", "LEGACY") \
-    .getOrCreate()
-
-spark.sparkContext.setLogLevel("ERROR")
-
-# ---------------------------------------------------------------------------
-# ÉTAPE 1 — RAPPEL DU CONTEXTE (affiché en console)
-# ---------------------------------------------------------------------------
-contexte = """
-╔══════════════════════════════════════════════════════════════════════════════╗
-║          ÉTUDE PRICE TEST — SEGMENT JEUNES CONDUCTEURS (< 30 ANS)           ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║                                                                              ║
-║  MESURES TARIFAIRES APPLIQUÉES (variable : majoration_price_test)            ║
-║  ┌─────────────┬───────────────────────────────────────────────────────┐    ║
-║  │  Modalité   │  Signification                                         │    ║
-║  ├─────────────┼───────────────────────────────────────────────────────┤    ║
-║  │     -2      │  Réduction de 2% sur la majoration au renouvellement  │    ║
-║  │     -1      │  Réduction de 1% sur la majoration au renouvellement  │    ║
-║  │      0      │  Aucune variation (groupe témoin)                     │    ║
-║  │     +1      │  Hausse de 1% sur la majoration au renouvellement     │    ║
-║  │     +2      │  Hausse de 2% sur la majoration au renouvellement     │    ║
-║  └─────────────┴───────────────────────────────────────────────────────┘    ║
-║                                                                              ║
-║  POPULATIONS ÉLIGIBLES AU PRICE TEST (variable : population_cible)          ║
-║  • "Price Test"  : Population soumise au test tarifaire actif               ║
-║  • "Psy Test"    : Groupe de contrôle psychologique                         ║
-║  • "Non defini"  : Population hors périmètre du test                        ║
-║                                                                              ║
-║  PÉRIMÈTRE : Contrats avec âge < 30 ans | Millésimes 2022, 2023, 2024, 2025║
-╚══════════════════════════════════════════════════════════════════════════════╝
-"""
-print(contexte)
-
-
-# ---------------------------------------------------------------------------
-# 1. CHARGEMENT DES DONNÉES
-# ---------------------------------------------------------------------------
-# Adaptez les chemins selon votre environnement (HDFS, ADLS, S3, local…)
-
-def load_base(year: int):
-    """Charge et tague la base annuelle."""
-    path = f"/data/assurance/portefeuille_{year}.parquet"   # ← À adapter
-    # path = f"/mnt/data/portefeuille_{year}.csv"           # si CSV
-    df = spark.read.parquet(path)
-    # df = spark.read.csv(path, header=True, inferSchema=True)
-    return df.withColumn("annee", F.lit(year))
-
-df_2022 = load_base(2022)
-df_2023 = load_base(2023)
-df_2024 = load_base(2024)
-df_2025 = load_base(2025)
-
-df_raw = df_2022.unionByName(df_2023, allowMissingColumns=True) \
-                .unionByName(df_2024, allowMissingColumns=True) \
-                .unionByName(df_2025, allowMissingColumns=True)
-
-print(f"[INFO] Données brutes chargées : {df_raw.count():,} lignes")
-
-
-# ---------------------------------------------------------------------------
-# 2. NETTOYAGE & TYPAGE
-# ---------------------------------------------------------------------------
-df_clean = df_raw \
-    .withColumn("age", F.col("age").cast("integer")) \
-    .withColumn("prime_ht",      F.col("prime ht").cast(DoubleType())) \
-    .withColumn("prime_ttc",     F.col("prime ttc").cast(DoubleType())) \
-    .withColumn("prime_ttc_av",  F.col("prime ttc avant renouvellement").cast(DoubleType())) \
-    .withColumn("coef_tarifaire", F.col("coefficient tarifaire").cast(DoubleType())) \
-    .withColumn("majoration_applique", F.col("majoration_applique").cast(DoubleType())) \
-    .withColumn("elr",   F.col("elr").cast(DoubleType())) \
-    .withColumn("resilie", F.col("resilie").cast("integer")) \
-    .withColumn("prix_test_moda", F.col("majoration-price-test").cast("integer")) \
-    .withColumn("population_cible", F.trim(F.col("population cible price test"))) \
-    .withColumn("segment_client",   F.trim(F.col("segment de client"))) \
-    .withColumn("date_renouvellement",
-                F.to_date(F.col("date renouvellement"), "yyyy-MM-dd")) \
-    .withColumn("date_emission_resiliation",
-                F.to_date(F.col("date emission resiliation"), "yyyy-MM-dd"))
-
-
-# ---------------------------------------------------------------------------
-# 3. FILTRE JEUNES CONDUCTEURS (< 30 ANS)
-# ---------------------------------------------------------------------------
-df_jeunes = df_clean.filter(F.col("age") < 30)
-print(f"[INFO] Après filtre âge < 30 : {df_jeunes.count():,} lignes")
-
-
-# ---------------------------------------------------------------------------
-# 4. CALCUL DES FENÊTRES DE RÉSILIATION
-# ---------------------------------------------------------------------------
-df_jeunes = df_jeunes.withColumn(
-    "delta_jours",
-    F.datediff(
-        F.col("date_emission_resiliation"),
-        F.col("date_renouvellement")
-    )
-)
-
-# Résiliation dans la fenêtre : entre -30 j et +90 j autour du renouvellement
-df_jeunes = df_jeunes \
-    .withColumn(
-        "resil_fenetree",
-        F.when(
-            (F.col("resilie") == 1) &
-            (F.col("delta_jours").between(-30, 90)),
-            1
-        ).otherwise(0)
-    ) \
-    .withColumn(
-        "resil_hors_fenetre",
-        F.when(
-            (F.col("resilie") == 1) &
-            (
-                (F.col("delta_jours") < -30) |
-                (F.col("delta_jours") > 90)  |
-                F.col("delta_jours").isNull()
-            ),
-            1
-        ).otherwise(0)
-    )
-
-
-# ---------------------------------------------------------------------------
-# ÉTAPE 2 — TABLEAU DE BORD GLOBAL PAR ANNÉE
-# ---------------------------------------------------------------------------
-print("\n" + "="*78)
-print("  ÉTAPE 2 — VISION GLOBALE PAR ANNÉE")
-print("="*78)
-
-bilan_annee = df_jeunes.groupBy("annee").agg(
-    F.count("contrat").alias("exposition"),
-    F.sum("prime_ht").alias("ressource_ht"),
-    F.avg("prime_ht").alias("prime_moy_ht"),
-    F.avg("prime_ttc").alias("prime_moy_ttc"),
-    F.avg("elr").alias("elr_moyen"),
-    F.avg("majoration_applique").alias("maj_moy_applique"),
-    F.avg("coef_tarifaire").alias("coef_tarifaire_moyen"),
-    F.sum("resil_fenetree").alias("nb_resil_fenetre"),
-    F.sum("resil_hors_fenetre").alias("nb_resil_hors"),
-    F.sum("resilie").alias("nb_resil_total")
-)
-
-# Poids des jeunes par rapport au total portefeuille (toutes tranches d'âge)
-total_par_annee = df_clean.groupBy("annee").agg(
-    F.sum("prime_ht").alias("total_ht_portefeuille")
-)
-
-bilan_annee = bilan_annee \
-    .join(total_par_annee, on="annee", how="left") \
-    .withColumn(
-        "poids_segment_pct",
-        F.round(F.col("ressource_ht") / F.col("total_ht_portefeuille") * 100, 2)
-    ) \
-    .withColumn(
-        "taux_resil_fenetre_pct",
-        F.round(F.col("nb_resil_fenetre") / F.col("exposition") * 100, 2)
-    ) \
-    .withColumn(
-        "taux_resil_hors_pct",
-        F.round(F.col("nb_resil_hors") / F.col("exposition") * 100, 2)
-    ) \
-    .withColumn("ressource_ht_M", F.round(F.col("ressource_ht") / 1_000_000, 3)) \
-    .withColumn("prime_moy_ht",   F.round("prime_moy_ht", 2)) \
-    .withColumn("prime_moy_ttc",  F.round("prime_moy_ttc", 2)) \
-    .withColumn("elr_moyen",      F.round("elr_moyen", 4)) \
-    .withColumn("maj_moy_applique",    F.round("maj_moy_applique", 4)) \
-    .withColumn("coef_tarifaire_moyen", F.round("coef_tarifaire_moyen", 4)) \
-    .orderBy("annee")
-
-print("\n[TABLEAU 1] Bilan global — Segment Jeunes Conducteurs (< 30 ans)\n")
-bilan_annee.select(
-    "annee", "exposition", "ressource_ht_M",
-    "prime_moy_ht", "prime_moy_ttc",
-    "poids_segment_pct", "elr_moyen",
-    "maj_moy_applique", "coef_tarifaire_moyen",
-    "taux_resil_fenetre_pct", "taux_resil_hors_pct"
-).show(truncate=False)
-
-
-# ---------------------------------------------------------------------------
-# ÉTAPE 3 — ANALYSE PAR MODALITÉ DU PRICE TEST
-# ---------------------------------------------------------------------------
-print("\n" + "="*78)
-print("  ÉTAPE 3 — ANALYSE PAR MODALITÉ PRICE TEST × ANNÉE")
-print("="*78)
-
-# Filtre uniquement sur la population "Price Test"
-df_pt = df_jeunes.filter(F.col("population_cible") == "Price Test")
-
-bilan_moda = df_pt.groupBy("annee", "prix_test_moda").agg(
-    F.count("contrat").alias("exposition"),
-    F.sum("prime_ht").alias("ressource_ht"),
-    F.avg("majoration_applique").alias("maj_moy"),
-    F.avg("elr").alias("elr_moyen"),
-    F.sum("resil_fenetree").alias("nb_resil_fenetre"),
-    F.sum("resil_hors_fenetre").alias("nb_resil_hors"),
-    F.sum("resilie").alias("nb_resil_total")
-).withColumn(
-    "taux_resil_global_pct",
-    F.round(F.col("nb_resil_total") / F.col("exposition") * 100, 2)
-).withColumn(
-    "taux_resil_fenetre_pct",
-    F.round(F.col("nb_resil_fenetre") / F.col("exposition") * 100, 2)
-).withColumn(
-    "maj_moy", F.round("maj_moy", 4)
-).withColumn(
-    "elr_moyen", F.round("elr_moyen", 4)
-).orderBy("annee", "prix_test_moda")
-
-print("\n[TABLEAU 2] Bilan par Modalité du Price Test\n")
-bilan_moda.show(40, truncate=False)
-
-
-# ---------------------------------------------------------------------------
-# ANALYSE POPULATION : Price Test vs Non défini vs Psy Test
-# ---------------------------------------------------------------------------
-bilan_population = df_jeunes.groupBy("annee", "population_cible").agg(
-    F.count("contrat").alias("exposition"),
-    F.avg("majoration_applique").alias("maj_moy"),
-    F.sum("resil_fenetree").alias("nb_resil_fenetre"),
-    F.sum("resil_hors_fenetre").alias("nb_resil_hors"),
-    F.sum("resilie").alias("nb_resil_total")
-).withColumn(
-    "taux_resil_global_pct",
-    F.round(F.col("nb_resil_total") / F.col("exposition") * 100, 2)
-).withColumn(
-    "taux_resil_fenetre_pct",
-    F.round(F.col("nb_resil_fenetre") / F.col("exposition") * 100, 2)
-).withColumn(
-    "maj_moy", F.round("maj_moy", 4)
-).orderBy("annee", "population_cible")
-
-print("\n[TABLEAU 3] Comparaison Population (Price Test vs Autres)\n")
-bilan_population.show(30, truncate=False)
-
-
-# ---------------------------------------------------------------------------
-# ANALYSE ÉLASTICITÉ-PRIX
-# ---------------------------------------------------------------------------
-print("\n" + "="*78)
-print("  ANALYSE ÉLASTICITÉ-PRIX PAR MODALITÉ")
-print("="*78)
-
-# Arc-élasticité : % variation résiliation / % variation prime
-w = Window.partitionBy("annee").orderBy("prix_test_moda")
-
-elast_df = bilan_moda.select(
-    "annee", "prix_test_moda", "exposition",
-    "taux_resil_global_pct", "maj_moy"
-).withColumn(
-    "delta_resil",
-    F.col("taux_resil_global_pct") - F.lag("taux_resil_global_pct", 1).over(w)
-).withColumn(
-    "delta_maj",
-    F.col("maj_moy") - F.lag("maj_moy", 1).over(w)
-).withColumn(
-    "elasticite_arc",
-    F.when(
-        F.col("delta_maj") != 0,
-        F.round((F.col("delta_resil") / F.col("delta_maj")), 4)
-    ).otherwise(None)
-).orderBy("annee", "prix_test_moda")
-
-print("\n[TABLEAU 4] Élasticité-Prix arc par modalité et par année\n")
-elast_df.show(40, truncate=False)
-
-
-# ---------------------------------------------------------------------------
-# IMPACT NET : GAIN PRIME vs PERTE PORTEFEUILLE
-# ---------------------------------------------------------------------------
-print("\n" + "="*78)
-print("  IMPACT NET DU PRICE TEST (GAIN PRIME vs PERTE PORTEFEUILLE)")
-print("="*78)
-
-# Récupérer la prime moyenne et le taux de résiliation pour la modalité 0 (référence)
-base_ref = bilan_moda.filter(F.col("prix_test_moda") == 0) \
-    .select(
-        "annee",
-        F.col("ressource_ht").alias("ht_ref"),
-        F.col("exposition").alias("expo_ref"),
-        F.col("taux_resil_global_pct").alias("taux_ref")
-    )
-
-impact_net = bilan_moda \
-    .join(base_ref, on="annee", how="left") \
-    .withColumn(
-        "gain_prime_estime",
-        F.round((F.col("ressource_ht") - F.col("ht_ref")), 0)
-    ) \
-    .withColumn(
-        "perte_expo_estime",
-        F.round(
-            (F.col("taux_resil_global_pct") - F.col("taux_ref"))
-            / 100 * F.col("expo_ref"), 0
-        )
-    ) \
-    .select(
-        "annee", "prix_test_moda", "exposition",
-        "ressource_ht", "gain_prime_estime",
-        "taux_resil_global_pct", "taux_ref",
-        "perte_expo_estime"
-    ).orderBy("annee", "prix_test_moda")
-
-print("\n[TABLEAU 5] Impact net estimé par modalité vs groupe témoin (modalité 0)\n")
-impact_net.show(40, truncate=False)
-
-
-# ===========================================================================
-# VISUALISATIONS
-# ===========================================================================
-# Conversion en Pandas pour matplotlib
-bilan_annee_pd   = bilan_annee.toPandas()
-bilan_moda_pd    = bilan_moda.toPandas()
-bilan_pop_pd     = bilan_population.toPandas()
-elast_pd         = elast_df.toPandas()
-impact_net_pd    = impact_net.toPandas()
-
-ANNEES   = sorted(bilan_moda_pd["annee"].unique())
-MODALITES = sorted(bilan_moda_pd["prix_test_moda"].unique())
-
-# Palette couleurs (bleu ciel / actuarielle)
-COLORS_MODA = {
-    -2: "#1a6fa8",
-    -1: "#4fa3d4",
-     0: "#a8d5ea",
-     1: "#f4a261",
-     2: "#e76f51"
-}
-BLUE_MAIN   = "#1a6fa8"
-BLUE_LIGHT  = "#87ceeb"
-BLUE_MED    = "#4fa3d4"
-ORANGE_ACC  = "#e76f51"
-GREY_LINE   = "#2d2d2d"
-GRAY_BG     = "#f7fbff"
+# -------------------------------------------------------------------------
+# 1. PALETTE & STYLE
+# -------------------------------------------------------------------------
+SKY_BLUE   = "#87CEEB"   # bleu ciel principal
+DEEP_BLUE  = "#4A90B8"   # bleu ciel foncé (accent)
+LIGHT_BLUE = "#E8F4F9"   # bleu très clair (fond / zones)
+GREY       = "#8C8C8C"   # gris pour axes / textes secondaires
+WHITE      = "#FFFFFF"
 
 plt.rcParams.update({
-    "font.family": "DejaVu Sans",
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "axes.grid": True,
-    "grid.alpha": 0.35,
-    "grid.color": "#c5d9e8",
-    "axes.labelsize": 9,
-    "xtick.labelsize": 8,
-    "ytick.labelsize": 8,
+    "figure.facecolor"  : WHITE,
+    "axes.facecolor"    : WHITE,
+    "axes.edgecolor"    : GREY,
+    "axes.labelcolor"   : "#333333",
+    "axes.titlesize"    : 12,
+    "axes.titleweight"  : "bold",
+    "axes.spines.top"   : False,
+    "axes.spines.right" : False,
+    "xtick.color"       : GREY,
+    "ytick.color"       : GREY,
+    "grid.color"        : "#EEEEEE",
+    "grid.linestyle"    : "--",
+    "font.family"       : "DejaVu Sans",
 })
 
+# -------------------------------------------------------------------------
+# 2. CHARGEMENT DES DONNEES
+# -------------------------------------------------------------------------
+def load_data(path_v1, path_v2, id_col="police_id",
+              prime_col="prime_totale", prime_actuelle_col="prime_actuelle"):
+    """
+    Charge les deux versions tarifaires et les fusionne sur l'identifiant police.
+    Chaque fichier doit contenir :
+      - un identifiant unique (id_col)
+      - la prime totale (prime_col)
+      - le prix de chaque garantie (colonnes commençant par 'gar_')
+      - optionnel : la prime payée actuellement (prime_actuelle_col)
+    """
+    v1 = pd.read_csv(path_v1)
+    v2 = pd.read_csv(path_v2)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# VISUEL 1 — Exposition par modalité (barres) + Taux résil + Majoration moy
-# ─────────────────────────────────────────────────────────────────────────────
-fig, axes = plt.subplots(2, 2, figsize=(16, 10))
-fig.suptitle(
-    "VISUEL 1 — Impact des Modalités du Price Test par Année\nSegment Jeunes Conducteurs (< 30 ans)",
-    fontsize=13, fontweight="bold", color="#1a2a3a", y=1.01
-)
-
-for idx, (annee, ax) in enumerate(zip(ANNEES, axes.flatten())):
-    d = bilan_moda_pd[bilan_moda_pd["annee"] == annee].sort_values("prix_test_moda")
-
-    # Barres : exposition
-    bars = ax.bar(
-        d["prix_test_moda"].astype(str),
-        d["exposition"],
-        color=[COLORS_MODA.get(m, BLUE_LIGHT) for m in d["prix_test_moda"]],
-        width=0.5, zorder=3, alpha=0.88
-    )
-    ax.set_ylabel("Exposition (nb contrats)", color=BLUE_MAIN)
-    ax.set_facecolor(GRAY_BG)
-
-    # Axe secondaire : taux résiliation
-    ax2 = ax.twinx()
-    ax2.plot(
-        d["prix_test_moda"].astype(str),
-        d["taux_resil_global_pct"],
-        color=ORANGE_ACC, marker="o", linewidth=2.0,
-        markersize=6, label="Taux résil. global (%)", zorder=5
-    )
-
-    # Axe secondaire : majoration moyenne
-    ax2.plot(
-        d["prix_test_moda"].astype(str),
-        d["maj_moy"] * 100,  # passage en %
-        color=GREY_LINE, marker="s", linewidth=1.5, linestyle="--",
-        markersize=5, label="Majoration moy. (%)", zorder=5
-    )
-    ax2.set_ylabel("Taux résil. & Majoration (%)", fontsize=8)
-    ax2.spines["top"].set_visible(False)
-
-    ax.set_title(f"Année {annee}", fontweight="bold", fontsize=10, color="#1a2a3a")
-    ax.set_xlabel("Modalité price test", fontsize=8)
-
-    # Étiquettes sur barres
-    for bar in bars:
-        h = bar.get_height()
-        ax.text(
-            bar.get_x() + bar.get_width() / 2, h + h * 0.01,
-            f"{int(h):,}", ha="center", va="bottom", fontsize=7.5, color="#1a2a3a"
-        )
-
-    if idx == 0:
-        ax2.legend(loc="upper left", fontsize=7.5, framealpha=0.7)
-
-plt.tight_layout()
-plt.savefig("/tmp/visuel1_modalites_price_test.png", dpi=150, bbox_inches="tight")
-plt.show()
-print("[OK] Visuel 1 sauvegardé.")
+    merged = v1.merge(v2, on=id_col, suffixes=("_v1", "_v2"))
+    return merged, v1, v2
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# VISUEL 2 — Price Test vs Reste du portefeuille (Majoration + Résiliation)
-# ─────────────────────────────────────────────────────────────────────────────
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-fig.suptitle(
-    "VISUEL 2 — Price Test vs Autres Populations\nMajoration & Taux de Résiliation par Année",
-    fontsize=13, fontweight="bold", color="#1a2a3a"
-)
+# -------------------------------------------------------------------------
+# 3. CALCUL DES INDICATEURS
+# -------------------------------------------------------------------------
+def compute_metrics(df, prime_col="prime_totale", prime_actuelle_col="prime_actuelle"):
+    """
+    Calcule :
+      - Ecart absolu et relatif entre V1 et V2 sur la prime totale
+      - Coefficient tarifaire V1 et V2 (prime AN / prime actuelle)
+      - Variation du coefficient tarifaire
+    """
+    df = df.copy()
+    df["ecart_abs"]    = df[f"{prime_col}_v2"] - df[f"{prime_col}_v1"]
+    df["ecart_rel"]    = df["ecart_abs"] / df[f"{prime_col}_v1"]
 
-pop_colors = {
-    "Price Test":  BLUE_MAIN,
-    "Psy Test":    BLUE_MED,
-    "Non defini":  "#b0c4de"
-}
+    if prime_actuelle_col in df.columns:
+        prime_act = df[prime_actuelle_col]
+    elif f"{prime_actuelle_col}_v1" in df.columns:
+        prime_act = df[f"{prime_actuelle_col}_v1"]
+    else:
+        prime_act = None
 
-for pop in bilan_pop_pd["population_cible"].unique():
-    sub = bilan_pop_pd[bilan_pop_pd["population_cible"] == pop].sort_values("annee")
-    c = pop_colors.get(pop, "#999")
+    if prime_act is not None:
+        df["coef_v1"]     = df[f"{prime_col}_v1"] / prime_act
+        df["coef_v2"]     = df[f"{prime_col}_v2"] / prime_act
+        df["delta_coef"]  = df["coef_v2"] - df["coef_v1"]
 
-    ax1.plot(
-        sub["annee"], sub["maj_moy"] * 100,
-        marker="o", linewidth=2.2, color=c, label=pop
-    )
-    ax2.plot(
-        sub["annee"], sub["taux_resil_global_pct"],
-        marker="o", linewidth=2.2, color=c, label=pop
-    )
-
-ax1.set_title("Majoration Moyenne Appliquée (%)", fontweight="bold", fontsize=10)
-ax1.set_ylabel("Majoration (%)")
-ax1.set_xlabel("Année")
-ax1.set_facecolor(GRAY_BG)
-ax1.legend(fontsize=8)
-
-ax2.set_title("Taux de Résiliation Global (%)", fontweight="bold", fontsize=10)
-ax2.set_ylabel("Taux de résiliation (%)")
-ax2.set_xlabel("Année")
-ax2.set_facecolor(GRAY_BG)
-ax2.legend(fontsize=8)
-
-plt.tight_layout()
-plt.savefig("/tmp/visuel2_pt_vs_reste.png", dpi=150, bbox_inches="tight")
-plt.show()
-print("[OK] Visuel 2 sauvegardé.")
+    return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# VISUEL 3 — ELR moyen par modalité × année (Heatmap)
-# ─────────────────────────────────────────────────────────────────────────────
-pivot_elr = bilan_moda_pd.pivot(
-    index="prix_test_moda", columns="annee", values="elr_moyen"
-)
+def summary_stats(df, prime_col="prime_totale"):
+    """Statistiques globales comparatives."""
+    stats = pd.DataFrame({
+        "V1": [
+            df[f"{prime_col}_v1"].mean(),
+            df[f"{prime_col}_v1"].median(),
+            df[f"{prime_col}_v1"].std(),
+            df[f"{prime_col}_v1"].sum(),
+        ],
+        "V2": [
+            df[f"{prime_col}_v2"].mean(),
+            df[f"{prime_col}_v2"].median(),
+            df[f"{prime_col}_v2"].std(),
+            df[f"{prime_col}_v2"].sum(),
+        ],
+    }, index=["Moyenne", "Médiane", "Ecart-type", "Total portefeuille"])
 
-fig, ax = plt.subplots(figsize=(10, 4.5))
-im = ax.imshow(pivot_elr.values, cmap="RdYlGn_r", aspect="auto", vmin=0.6, vmax=1.2)
-plt.colorbar(im, ax=ax, label="ELR moyen")
-
-ax.set_xticks(range(len(pivot_elr.columns)))
-ax.set_xticklabels(pivot_elr.columns)
-ax.set_yticks(range(len(pivot_elr.index)))
-ax.set_yticklabels([f"Modalité {m:+d}" for m in pivot_elr.index])
-
-# Annotations dans chaque cellule
-for i in range(len(pivot_elr.index)):
-    for j in range(len(pivot_elr.columns)):
-        val = pivot_elr.values[i, j]
-        if not np.isnan(val):
-            ax.text(j, i, f"{val:.3f}", ha="center", va="center",
-                    fontsize=9, color="black", fontweight="bold")
-
-ax.set_title(
-    "VISUEL 3 — ELR Moyen par Modalité du Price Test & par Année\n"
-    "Vert = rentable (ELR < 1), Rouge = déficitaire (ELR > 1)",
-    fontsize=11, fontweight="bold", color="#1a2a3a"
-)
-ax.set_xlabel("Année")
-plt.tight_layout()
-plt.savefig("/tmp/visuel3_elr_heatmap.png", dpi=150, bbox_inches="tight")
-plt.show()
-print("[OK] Visuel 3 (Heatmap ELR) sauvegardé.")
+    stats["Δ absolu"]  = stats["V2"] - stats["V1"]
+    stats["Δ relatif"] = (stats["V2"] - stats["V1"]) / stats["V1"]
+    return stats
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# VISUEL 4 — Impact Net : Gain prime vs Perte portefeuille par modalité
-# ─────────────────────────────────────────────────────────────────────────────
-fig, axes = plt.subplots(2, 2, figsize=(16, 9))
-fig.suptitle(
-    "VISUEL 4 — Impact Net du Price Test vs Modalité 0 (Groupe Témoin)\n"
-    "Gain de Prime & Perte d'Exposition Estimée par Année",
-    fontsize=13, fontweight="bold", color="#1a2a3a"
-)
-
-for idx, (annee, ax) in enumerate(zip(ANNEES, axes.flatten())):
-    d = impact_net_pd[impact_net_pd["annee"] == annee].sort_values("prix_test_moda")
-    d = d[d["prix_test_moda"] != 0]
-
-    moda_labels = [f"{m:+d}" for m in d["prix_test_moda"]]
-    x = np.arange(len(moda_labels))
-    width = 0.35
-
-    bar1 = ax.bar(x - width/2, d["gain_prime_estime"], width,
-                  label="Gain prime estimé (€)", color=BLUE_MED, alpha=0.85)
-    ax2 = ax.twinx()
-    bar2 = ax2.bar(x + width/2, d["perte_expo_estime"], width,
-                   label="Perte exposition (nb contrats)", color=ORANGE_ACC, alpha=0.75)
-
-    ax.axhline(0, color="black", linewidth=0.8)
-    ax.set_title(f"Année {annee}", fontweight="bold", fontsize=10, color="#1a2a3a")
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"Modalité {l}" for l in moda_labels], fontsize=8)
-    ax.set_ylabel("Gain prime (€)", color=BLUE_MED, fontsize=8)
-    ax2.set_ylabel("Perte expo (contrats)", color=ORANGE_ACC, fontsize=8)
-    ax.set_facecolor(GRAY_BG)
-    ax2.spines["top"].set_visible(False)
-
-    if idx == 0:
-        lines = [bar1, bar2]
-        labels = ["Gain prime estimé (€)", "Perte exposition (nb contrats)"]
-        ax.legend(lines, labels, fontsize=7.5, loc="upper left", framealpha=0.7)
-
-plt.tight_layout()
-plt.savefig("/tmp/visuel4_impact_net.png", dpi=150, bbox_inches="tight")
-plt.show()
-print("[OK] Visuel 4 (Impact Net) sauvegardé.")
+def garantie_impact(df, prefix="gar_"):
+    """Impact par garantie : écart moyen absolu et relatif."""
+    g_cols_v1 = [c for c in df.columns if c.startswith(prefix) and c.endswith("_v1")]
+    rows = []
+    for c1 in g_cols_v1:
+        name = c1.replace("_v1", "").replace(prefix, "")
+        c2 = c1.replace("_v1", "_v2")
+        if c2 not in df.columns:
+            continue
+        mean_v1 = df[c1].mean()
+        mean_v2 = df[c2].mean()
+        rows.append({
+            "garantie"       : name,
+            "prime_moy_v1"   : mean_v1,
+            "prime_moy_v2"   : mean_v2,
+            "ecart_abs_moy"  : mean_v2 - mean_v1,
+            "ecart_rel_moy"  : (mean_v2 - mean_v1) / mean_v1 if mean_v1 else np.nan,
+        })
+    return pd.DataFrame(rows).sort_values("ecart_rel_moy", key=abs, ascending=False)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# VISUEL 5 — Évolution de l'exposition et de la ressource HT (Jeunes)
-# ─────────────────────────────────────────────────────────────────────────────
-fig, ax1 = plt.subplots(figsize=(12, 5))
-fig.suptitle(
-    "VISUEL 5 — Évolution du Portefeuille Jeunes Conducteurs (2022–2025)\n"
-    "Exposition & Ressources HT",
-    fontsize=12, fontweight="bold", color="#1a2a3a"
-)
-
-years_sorted = bilan_annee_pd.sort_values("annee")
-
-bars = ax1.bar(
-    years_sorted["annee"].astype(str),
-    years_sorted["exposition"],
-    color=BLUE_LIGHT, width=0.4, label="Exposition (nb contrats)", zorder=3
-)
-ax1.set_ylabel("Exposition (nb contrats)", color=BLUE_MAIN)
-ax1.set_facecolor(GRAY_BG)
-
-ax2_v5 = ax1.twinx()
-ax2_v5.plot(
-    years_sorted["annee"].astype(str),
-    years_sorted["ressource_ht_M"],
-    color=BLUE_MAIN, marker="D", linewidth=2.5, markersize=7,
-    label="Ressources HT (M€)", zorder=5
-)
-ax2_v5.set_ylabel("Ressources HT (M€)", color=BLUE_MAIN)
-ax2_v5.spines["top"].set_visible(False)
-
-# Annotations barres
-for bar in bars:
-    h = bar.get_height()
-    ax1.text(
-        bar.get_x() + bar.get_width() / 2, h + h * 0.01,
-        f"{int(h):,}", ha="center", va="bottom", fontsize=9, color="#1a2a3a"
-    )
-
-lines1, labels1 = ax1.get_legend_handles_labels()
-lines2, labels2 = ax2_v5.get_legend_handles_labels()
-ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=9)
-
-plt.tight_layout()
-plt.savefig("/tmp/visuel5_exposition_ht.png", dpi=150, bbox_inches="tight")
-plt.show()
-print("[OK] Visuel 5 (Exposition & HT) sauvegardé.")
+# -------------------------------------------------------------------------
+# 4. VISUALISATIONS
+# -------------------------------------------------------------------------
+def plot_distribution_primes(df, prime_col="prime_totale", save=None):
+    """Distribution comparée des primes totales V1 vs V2."""
+    fig, ax = plt.subplots(figsize=(9, 5))
+    bins = 40
+    ax.hist(df[f"{prime_col}_v1"], bins=bins, alpha=0.55, color=SKY_BLUE,
+            label="Version 1", edgecolor=WHITE)
+    ax.hist(df[f"{prime_col}_v2"], bins=bins, alpha=0.55, color=DEEP_BLUE,
+            label="Version 2", edgecolor=WHITE)
+    ax.axvline(df[f"{prime_col}_v1"].mean(), color=SKY_BLUE, linestyle="--", linewidth=1)
+    ax.axvline(df[f"{prime_col}_v2"].mean(), color=DEEP_BLUE, linestyle="--", linewidth=1)
+    ax.set_title("Distribution des primes totales  —  V1 vs V2")
+    ax.set_xlabel("Prime totale (€)")
+    ax.set_ylabel("Nombre de polices")
+    ax.legend(frameon=False)
+    ax.grid(True, axis="y", alpha=0.6)
+    plt.tight_layout()
+    if save: plt.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# VISUEL 6 — Distribution des résiliations : fenêtrée vs hors fenêtre
-# ─────────────────────────────────────────────────────────────────────────────
-fig, axes = plt.subplots(1, len(ANNEES), figsize=(16, 5), sharey=True)
-fig.suptitle(
-    "VISUEL 6 — Taux de Résiliation : Dans la Fenêtre vs Hors Fenêtre\npar Modalité & Année",
-    fontsize=12, fontweight="bold", color="#1a2a3a"
-)
+def plot_ecart_relatif(df, save=None):
+    """Distribution des écarts relatifs entre V1 et V2 (en %)."""
+    fig, ax = plt.subplots(figsize=(9, 5))
+    data = df["ecart_rel"] * 100
+    ax.hist(data, bins=40, color=SKY_BLUE, edgecolor=WHITE)
+    ax.axvline(0, color=GREY, linewidth=1)
+    ax.axvline(data.mean(), color=DEEP_BLUE, linestyle="--",
+               label=f"Moyenne : {data.mean():+.2f} %")
+    ax.axvline(data.median(), color="#2E5E7E", linestyle=":",
+               label=f"Médiane : {data.median():+.2f} %")
+    ax.set_title("Distribution de l'écart relatif de prime  (V2 − V1) / V1")
+    ax.set_xlabel("Écart relatif (%)")
+    ax.set_ylabel("Nombre de polices")
+    ax.legend(frameon=False)
+    ax.grid(True, axis="y", alpha=0.6)
+    plt.tight_layout()
+    if save: plt.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
 
-for idx, (annee, ax) in enumerate(zip(ANNEES, axes)):
-    d = bilan_moda_pd[bilan_moda_pd["annee"] == annee].sort_values("prix_test_moda")
-    moda_labels = [f"{m:+d}" for m in d["prix_test_moda"]]
-    x = np.arange(len(moda_labels))
-    w = 0.35
 
-    ax.bar(x - w/2, d["taux_resil_fenetre_pct"], w,
-           label="Dans la fenêtre", color=BLUE_MAIN, alpha=0.85)
-    ax.bar(x + w/2, d.get("taux_resil_hors_pct", 0), w,
-           label="Hors fenêtre", color=BLUE_LIGHT, alpha=0.85)
+def plot_scatter_v1_v2(df, prime_col="prime_totale", save=None):
+    """Nuage de points V1 vs V2 avec droite y = x."""
+    fig, ax = plt.subplots(figsize=(7, 7))
+    x = df[f"{prime_col}_v1"]
+    y = df[f"{prime_col}_v2"]
+    ax.scatter(x, y, alpha=0.4, s=18, color=SKY_BLUE, edgecolor=DEEP_BLUE, linewidth=0.3)
+    lim = [min(x.min(), y.min()), max(x.max(), y.max())]
+    ax.plot(lim, lim, color=GREY, linestyle="--", linewidth=1, label="y = x")
+    ax.set_xlim(lim); ax.set_ylim(lim)
+    ax.set_xlabel("Prime V1 (€)")
+    ax.set_ylabel("Prime V2 (€)")
+    ax.set_title("Prime V2 vs Prime V1 par police")
+    ax.legend(frameon=False)
+    ax.grid(True, alpha=0.6)
+    plt.tight_layout()
+    if save: plt.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
 
-    ax.set_title(f"{annee}", fontweight="bold", fontsize=10)
-    ax.set_xticks(x)
-    ax.set_xticklabels(moda_labels, fontsize=8)
-    ax.set_xlabel("Modalité")
-    ax.set_facecolor(GRAY_BG)
 
-    if idx == 0:
-        ax.set_ylabel("Taux de résiliation (%)")
-        ax.legend(fontsize=7.5)
+def plot_garantie_impact(g_df, save=None):
+    """Barres horizontales : écart relatif moyen par garantie."""
+    fig, ax = plt.subplots(figsize=(9, max(4, 0.45 * len(g_df))))
+    colors = [DEEP_BLUE if v >= 0 else SKY_BLUE for v in g_df["ecart_rel_moy"]]
+    ax.barh(g_df["garantie"], g_df["ecart_rel_moy"] * 100,
+            color=colors, edgecolor=WHITE)
+    ax.axvline(0, color=GREY, linewidth=1)
+    ax.set_xlabel("Écart relatif moyen (%)")
+    ax.set_title("Impact du changement tarifaire par garantie")
+    ax.xaxis.set_major_formatter(PercentFormatter(decimals=1))
+    for i, (val, name) in enumerate(zip(g_df["ecart_rel_moy"] * 100, g_df["garantie"])):
+        ax.text(val + (0.3 if val >= 0 else -0.3), i, f"{val:+.1f}%",
+                va="center", ha="left" if val >= 0 else "right",
+                fontsize=9, color="#333")
+    ax.grid(True, axis="x", alpha=0.6)
+    plt.tight_layout()
+    if save: plt.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
 
-plt.tight_layout()
-plt.savefig("/tmp/visuel6_resil_fenetre.png", dpi=150, bbox_inches="tight")
-plt.show()
-print("[OK] Visuel 6 (Résiliations fenêtre) sauvegardé.")
 
-print("\n[DONE] Analyse complète terminée. Tous les visuels ont été sauvegardés dans /tmp/")
-spark.stop()
+def plot_coef_tarifaire(df, save=None):
+    """Comparaison du coefficient tarifaire V1 vs V2."""
+    if "coef_v1" not in df.columns:
+        print("⚠ prime_actuelle non disponible — coefficient non calculé.")
+        return None
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    # ----- (a) distribution des deux coefficients
+    ax = axes[0]
+    ax.hist(df["coef_v1"], bins=40, alpha=0.55, color=SKY_BLUE,
+            label=f"V1 (moy={df['coef_v1'].mean():.2f})", edgecolor=WHITE)
+    ax.hist(df["coef_v2"], bins=40, alpha=0.55, color=DEEP_BLUE,
+            label=f"V2 (moy={df['coef_v2'].mean():.2f})", edgecolor=WHITE)
+    ax.axvline(1.0, color=GREY, linestyle="--", linewidth=1, label="coef = 1")
+    ax.set_title("Distribution du coefficient tarifaire\n(prime AN / prime actuelle)")
+    ax.set_xlabel("Coefficient")
+    ax.set_ylabel("Nombre de polices")
+    ax.legend(frameon=False)
+    ax.grid(True, axis="y", alpha=0.6)
+
+    # ----- (b) variation du coefficient
+    ax = axes[1]
+    data = df["delta_coef"]
+    ax.hist(data, bins=40, color=SKY_BLUE, edgecolor=WHITE)
+    ax.axvline(0, color=GREY, linewidth=1)
+    ax.axvline(data.mean(), color=DEEP_BLUE, linestyle="--",
+               label=f"Moyenne : {data.mean():+.3f}")
+    ax.set_title("Variation du coefficient tarifaire  (V2 − V1)")
+    ax.set_xlabel("Δ coefficient")
+    ax.set_ylabel("Nombre de polices")
+    ax.legend(frameon=False)
+    ax.grid(True, axis="y", alpha=0.6)
+
+    plt.tight_layout()
+    if save: plt.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def plot_winners_losers(df, save=None):
+    """Répartition gagnants / neutres / perdants sur l'écart relatif."""
+    er = df["ecart_rel"] * 100
+    bins   = [-np.inf, -5, -1, 1, 5, np.inf]
+    labels = ["Baisse >5%", "Baisse 1-5%", "Stable ±1%", "Hausse 1-5%", "Hausse >5%"]
+    cats   = pd.cut(er, bins=bins, labels=labels)
+    counts = cats.value_counts().reindex(labels)
+    pct    = counts / counts.sum() * 100
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    colors = [SKY_BLUE, "#B8DCEA", "#DDDDDD", "#6FB0D0", DEEP_BLUE]
+    bars = ax.bar(labels, pct.values, color=colors, edgecolor=WHITE)
+    for b, v, n in zip(bars, pct.values, counts.values):
+        ax.text(b.get_x() + b.get_width()/2, v + 0.5,
+                f"{v:.1f}%\n({int(n)})", ha="center", fontsize=9, color="#333")
+    ax.set_ylabel("Part du portefeuille (%)")
+    ax.set_title("Répartition des polices par niveau d'impact de la V2")
+    ax.grid(True, axis="y", alpha=0.6)
+    plt.tight_layout()
+    if save: plt.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
+# -------------------------------------------------------------------------
+# 5. PIPELINE COMPLET
+# -------------------------------------------------------------------------
+def run_full_analysis(df, out_dir="."):
+    """Execute l'ensemble de l'analyse et sauvegarde les figures."""
+    import os
+    os.makedirs(out_dir, exist_ok=True)
+
+    df = compute_metrics(df)
+
+    print("=" * 70)
+    print("STATISTIQUES GLOBALES")
+    print("=" * 70)
+    print(summary_stats(df).round(2).to_string())
+    print()
+
+    g_df = garantie_impact(df)
+    print("=" * 70)
+    print("IMPACT PAR GARANTIE")
+    print("=" * 70)
+    print(g_df.round(3).to_string(index=False))
+    print()
+
+    if "coef_v1" in df.columns:
+        print("=" * 70)
+        print("COEFFICIENT TARIFAIRE (prime AN / prime actuelle)")
+        print("=" * 70)
+        print(f"Coef V1 — moyen : {df['coef_v1'].mean():.3f} | médian : {df['coef_v1'].median():.3f}")
+        print(f"Coef V2 — moyen : {df['coef_v2'].mean():.3f} | médian : {df['coef_v2'].median():.3f}")
+        print(f"Δ coef moyen    : {df['delta_coef'].mean():+.3f}")
+        print(f"% polices avec coef V2 > 1 : {(df['coef_v2'] > 1).mean()*100:.1f}%")
+        print()
+
+    plot_distribution_primes(df, save=f"{out_dir}/01_distribution_primes.png")
+    plot_ecart_relatif     (df, save=f"{out_dir}/02_ecart_relatif.png")
+    plot_scatter_v1_v2     (df, save=f"{out_dir}/03_scatter_v1_v2.png")
+    plot_garantie_impact   (g_df, save=f"{out_dir}/04_garantie_impact.png")
+    plot_coef_tarifaire    (df, save=f"{out_dir}/05_coef_tarifaire.png")
+    plot_winners_losers    (df, save=f"{out_dir}/06_winners_losers.png")
+
+    return df, g_df
