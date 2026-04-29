@@ -1,106 +1,75 @@
-import os
-from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_groq import ChatGroq
-from langchain.schema import Document
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain.memory import ConversationBufferMemory
-from dotenv import load_dotenv
+flowchart TD
+    Start([▶ AutoMoteurTerme.process_task]):::entry
 
-load_dotenv()
+    subgraph MOTEUR["MoteurTerme.py — Orchestrateur"]
+        direction LR
+        S1[Clean cache] --> S2[get_sources<br/>df_terme] --> S3[ScoringTerme] --> S4[JOIN BV ⨝ Scoring<br/>+ DateTerme] --> S5[ELR<br/>+ POL_PrimePure] --> S6[P3 MA + MCC<br/>unionByName]
+    end
 
-class Chatbot:
-    def __init__(self, config: dict):
-        self.db_path = config.get("db_path", "db")
-        self.embedding_model_name = config.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2")
-        self.model_name = config.get("llm_model", "llama3-8b-8192")
-        self.top_k = config.get("top_k", 3)
-        self.temperature = config.get("temperature", 0.1)
-        
-        # Initialiser les embeddings et la base vectorielle
-        self.embedding_model = HuggingFaceEmbeddings(model_name=self.embedding_model_name)
-        self.vector_store = Chroma(
-            persist_directory=self.db_path, 
-            embedding_function=self.embedding_model
-        )
-        
-        # Vérifier la clé API Groq
-        self.groq_api_key = os.getenv("GROQ_API_KEY")
-        if not self.groq_api_key:
-            raise ValueError("GROQ_API_KEY n'est pas définie dans les variables d'environnement")
-        
-        # Initialiser le modèle Groq
-        self.llm = ChatGroq(
-            groq_api_key=self.groq_api_key,
-            model_name=self.model_name,
-            temperature=self.temperature
-        )
-        
-        # Template de prompt avec un espace pour l'historique
-        self.prompt_template = PromptTemplate(
-            input_variables=["history", "context", "question"],
-            template="""
-Historique de conversation :
-{history}
+    subgraph PREP["preparation/ — Mise en forme & scope"]
+        direction LR
+        PP["Preprocessing.process<br/>fill → missing → array → mapping →<br/>cast → diff_dates → init → price_test → r0"]
+        ST[ScopeTerme<br/>in/out scope]
+        PP --> ST
+    end
 
-Contexte extrait des documents :
-{context}
+    subgraph ENGINE["MajorationEngine.process — Cœur métier"]
+        direction TB
 
-Question : {question}
+        subgraph CLAIMS["① Claims & LCA"]
+            direction LR
+            CHS["Claims_hsMED<br/>transpose → duree_FD →<br/>compute → aggregate"]
+            CMED["Claims_MED<br/>transpose → compute → aggregate"]
+            CCO["CreditCo<br/>transpose → compute → aggregate"]
+            JOIN1["JOIN df ⨝<br/>claims/med/lca"]
+            CYC[Claims_ycMED]
+            DROP[drop CLA/CC<br/>cols >6/4]
+            CHS --> JOIN1
+            CMED --> JOIN1
+            CCO --> JOIN1
+            JOIN1 --> CYC --> DROP
+        end
 
-Réponds de manière claire et structurée en t’appuyant sur le contexte et l’historique.
-            """
-        )
-        
-        # Chaîne LLM
-        self.chain = LLMChain(llm=self.llm, prompt=self.prompt_template)
-        
-        # Mémoire pour l’historique de la conversation
-        self.memory = ConversationBufferMemory(memory_key="history", return_messages=True)
+        subgraph ROW1[" "]
+            direction LR
+            SCOR["② MajoSin2<br/>MajoSinGar_F0 → MajoSinUT"]
+            CFT["③ CotisFraisTaxesELR<br/>taxes → Frais → Cotis →<br/>Cotis_hsMajo → CotisP3 → ELR"]
+            SEG["④ Segmentation<br/>Sinistralite → Mesures →<br/>Protection → MiniEuros"]
+            CHURN["⑤ ChurnModel<br/>coeffModel → ProbaModel →<br/>PriceSensitivity"]
+            SCOR --> CFT --> SEG --> CHURN
+        end
 
-    def retrieve_documents(self, query: str):
-        results = self.vector_store.similarity_search_with_score(query, k=self.top_k)
-        contexts = []
-        for i, (doc, score) in enumerate(results):
-            metadata_str = ""
-            if hasattr(doc, 'metadata') and doc.metadata:
-                metadata_str = f"Source: {doc.metadata.get('source', 'Inconnue')}"
-                if 'page' in doc.metadata:
-                    metadata_str += f", Page: {doc.metadata['page']}"
-            contexts.append(f"--- Document {i+1} (score: {score:.4f}) ---\n{metadata_str}\n{doc.page_content}")
-        return "\n\n".join(contexts)
-    
-    def chat(self, question: str) -> str:
-        # Récupérer le contexte depuis la base vectorielle
-        context = self.retrieve_documents(question)
-        # Récupérer l'historique de conversation
-        history = self.memory.load_memory_variables({}).get("history", "")
-        # Générer la réponse
-        response = self.chain.invoke({
-            "history": history,
-            "context": context,
-            "question": question
-        })
-        answer = response.get('text', '')
-        # Sauvegarder l'échange dans la mémoire
-        self.memory.save_context({"question": question}, {"answer": answer})
-        return answer
+        subgraph MAJ_BLOCK["⑥ ModuleMajoration"]
+            direction LR
+            subgraph MAJ_PIPE[" "]
+                direction LR
+                M1[ajust_ELR] --> M2[CCAS] --> M3[EO] --> M4[Brok] --> M5[Colla] --> M6[DmD] --> MF[(MajoFinale)] --> M7[cotis_F0]
+            end
+            subgraph MFIN["MajoFinale — 28 règles séquentielles"]
+                direction LR
+                R1["Scoring<br/>scoringSinistre →<br/>scoringMED"] --> R2["CCAS<br/>carburant → formule →<br/>marque → modeachat"] --> R3["Tolérance & butoirs<br/>tolerancesinistre → BDG_inf200 →<br/>ClientsRecents → CDB"]
+                R3 --> R4["Contrats<br/>Premature → Fragile → Remp2M →<br/>Rentables → SansAnt/EOM/MA →<br/>Jeune_T3_CUT"] --> R5["RIVierge & CRM<br/>RIVierge_hsBLD → BaisseCRM1 →<br/>RIVierge_ycBLD"] --> R6["VEH<br/>haute_gamme"]
+                R6 --> R7["Butoirs AGIRA<br/>agira →<br/>sinistreFraude"] --> R8["Butoirs surprotégés<br/>MultiEquipes → CollabAgents →<br/>SuperDetenteur_sup6"] --> R9["Finalisations<br/>extremes_pente →<br/>MonCampingCar → mini"]
+            end
+            MF -.contient.-> MFIN
+        end
 
-if __name__ == "__main__":
-    config = {
-        "db_path": "db",
-        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
-        "llm_model": "llama3-8b-8192",
-        "top_k": 3,
-        "temperature": 0.1
-    }
-    
-    chatbot = Chatbot(config)
-    print("Bienvenue dans le chatbot RAG ! (Tapez 'exit' pour quitter)")
-    while True:
-        question = input("Vous: ")
-        if question.lower() in ['exit', 'quit']:
-            break
-        answer = chatbot.chat(question)
-        print("Chatbot:", answer)
+        subgraph POST["⑦ Post-traitements"]
+            direction LR
+            PT[PriceTest] --> AJ[Ajustement<br/>parent-child] --> CT[ComputeCT] --> CPB[CotisPlancher<br/>Butoir] --> BM[Bulle<br/>Marketing] --> FD[Franchise<br/>Degressive] --> SG[CodeSGMT] --> PE[Patch_errors] --> AX[AxaPac]
+        end
+
+        CLAIMS --> ROW1 --> MAJ_BLOCK --> POST
+    end
+
+    subgraph OUT["MoteurTerme — Sorties"]
+        direction LR
+        O1[MarquageISA_F0<br/>+ tech_version] --> O2[write<br/>auto_moteur_terme] --> O3[write<br/>auto_moteur_terme_ko] --> O4{write_mainframe?}
+        O4 -- oui --> O5[generate_mainframe<br/>contrats_auto_termostat]
+        O4 -- non --> Done([■ Fin])
+        O5 --> Done
+    end
+
+    Start --> MOTEUR --> PREP --> ENGINE --> OUT
+
+    classDef entry fill:#1f6feb,color:#fff,stroke:#0b3d91,stroke-width:2px;
