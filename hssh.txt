@@ -1,4 +1,106 @@
+Ce projet vise à construire un modèle de  l'assurance.
+Exemple de projet :
+projet_resiliation_auto/
+│
+├── README.md
+├── requirements.txt
+├── .gitignore
+│
+├── config/
+│   ├── config.py
+│   ├── parameters.yaml
+│   └── feature_definitions.yaml
+│
+├── src/
+│   ├── __init__.py
+│   │
+│   ├── data/
+│   │   ├── __init__.py
+│   │   ├── loader.py
+│   │   ├── cleaning.py
+│   │   ├── quality_checks.py
+│   │   └── target.py
+│   │
+│   ├── features/
+│   │   ├── __init__.py
+│   │   ├── contrat.py
+│   │   ├── client.py
+│   │   ├── vehicule.py
+│   │   ├── sinistralite.py
+│   │   ├── paiement.py
+│   │   ├── comportement.py
+│   │   ├── temporelles.py
+│   │   ├── interactions.py
+│   │   └── selection.py
+│   │
+│   ├── modeling/
+│   │   ├── __init__.py
+│   │   ├── split.py
+│   │   ├── preprocessing.py
+│   │   ├── train.py
+│   │   ├── evaluate.py
+│   │   ├── calibration.py
+│   │   ├── interpret.py
+│   │   └── scoring.py
+│   │
+│   └── common/
+│       ├── __init__.py
+│       ├── spark_helpers.py
+│       ├── io_helpers.py
+│       ├── date_helpers.py
+│       └── logging_helpers.py
+│
+├── notebooks/
+│   ├── 01_data_preparation/
+│   │   ├── 01_load_explore.py
+│   │   ├── 02_quality_audit.py
+│   │   ├── 03_cleaning.py
+│   │   ├── 04_target_construction.py
+│   │   ├── 05_features_contrat.py
+│   │   ├── 06_features_client.py
+│   │   ├── 07_features_vehicule.py
+│   │   ├── 08_features_sinistralite.py
+│   │   ├── 09_features_paiement.py
+│   │   ├── 10_features_comportement.py
+│   │   ├── 11_features_temporelles.py
+│   │   ├── 12_master_table.py
+│   │   └── 13_feature_selection.py
+│   │
+│   ├── 02_eda/
+│   │   ├── 01_eda_target.py
+│   │   ├── 02_eda_features.py
+│   │   └── 03_eda_segments.py
+│   │
+│   ├── 03_modeling/
+│   │   ├── 01_train_test_split.py
+│   │   ├── 02_baseline_logistic.py
+│   │   ├── 03_train_lgbm.py
+│   │   ├── 04_train_xgboost.py
+│   │   ├── 05_hyperparameter_tuning.py
+│   │   ├── 06_evaluation.py
+│   │   ├── 07_calibration.py
+│   │   ├── 08_interpretation_shap.py
+│   │   └── 09_model_comparison.py
+│   │
+│   ├── 04_validation/
+│   │   ├── 01_stability_temporal.py
+│   │   ├── 02_performance_segments.py
+│   │   └── 03_business_validation.py
+│   │
+│   └── 05_scoring/
+│       ├── 01_scoring_pipeline.py
+│       └── 02_monitoring.py
+│
+├── tests/
+│   ├── test_cleaning.py
+│   ├── test_features.py
+│   └── test_target.py
+│
+└── docs/
+    ├── data_dictionary.md
+    ├── target_definition.md
     ├── feature_catalog.md
     └── modeling_decisions.md
 
-Génère moi le code comple
+
+Enrichir cette structure de plus.
