@@ -1,46 +1,70 @@
 import pandas as pd
 
-# --- 1. Charge tes données ---
-# Colonnes attendues : tranche_prime, segment, ab_test, taux_resiliation
-# ab_test en %, ex: 0, 1, 2, -1, -2   (PAS "0%", juste le nombre)
-# taux_resiliation en %, ex: 2.6
-df = pd.read_csv("mes_donnees.csv")
+# stats_hm = ta DataFrame issue de .agg().toPandas()
 
-# Si l'AB test est écrit "0%", "+2%"... décommente la ligne suivante :
-# df["ab_test"] = df["ab_test"].str.replace("%", "").str.replace("+", "").astype(float)
+# --- 1. Renommer pour simplifier ---
+df = stats_hm.rename(columns={
+    "POL_Segment_CourbesPrimeELR_simu": "segment",
+    "tranche_prime": "tranche",
+    "POL_MajorationPriceTest_simu": "majoration",
+    "taux_resil": "resil",
+    "nb_contrats": "nb",
+})
 
-# --- 2. Indice prix et rétention ---
-df["indice_prix"] = 100 + df["ab_test"]
-df["retention"]   = 100 - df["taux_resiliation"]
+# --- 2. Normaliser les échelles ---
+# majoration -> points de % (0, 1, 2, -1, -2)
+if df["majoration"].abs().max() <= 1:          # stockée en décimal (0.02) ?
+    df["majoration"] = df["majoration"] * 100
+df["majoration"] = df["majoration"].round(0).astype(int)
 
-# --- 3. Fonction élasticité d'arc (point milieu) ---
-def arc_elasticite(R_test, R_ref, I_test, I_ref=100):
-    num = (R_test - R_ref) / ((R_ref + R_test) / 2)   # variation rétention
-    den = (I_test - I_ref) / ((I_ref + I_test) / 2)   # variation prix
-    return num / den if den != 0 else None
+# résiliation : fraction (0.026) ou pourcentage (2.6) ? -> rétention = BASE - resil
+BASE = 1 if df["resil"].max() <= 1 else 100
+df["retention"] = BASE - df["resil"]
 
-# --- 4. Calcul par segment (et par tranche de prime) ---
-# On compare chaque bras au bras 0% du MEME groupe
-resultats = []
-for (tranche, segment), g in df.groupby(["tranche_prime", "segment"]):
-    ref = g[g["ab_test"] == 0]
+# --- 3. Fonction élasticité d'arc vs bras 0% ---
+def elasticite_arc(g):
+    ref = g[g["majoration"] == 0]
     if ref.empty:
-        continue  # pas de bras 0% -> pas de référence
-    R_ref = ref["retention"].iloc[0]
+        return pd.DataFrame()                  # pas de référence 0% -> on saute
+    R0 = ref["retention"].iloc[0]
+    lignes = []
+    for _, r in g[g["majoration"] != 0].sort_values("majoration").iterrows():
+        I = 100 + r["majoration"]              # indice prix (0% = 100)
+        num = (r["retention"] - R0) / ((R0 + r["retention"]) / 2)
+        den = (I - 100) / ((100 + I) / 2)
+        lignes.append({**r.to_dict(),
+                       "elasticite": round(num / den, 2) if den else None})
+    return pd.DataFrame(lignes)
 
-    for _, ligne in g[g["ab_test"] != 0].iterrows():
-        eps = arc_elasticite(ligne["retention"], R_ref, ligne["indice_prix"])
-        resultats.append({
-            "tranche_prime": tranche,
-            "segment": segment,
-            "ab_test": ligne["ab_test"],
-            "resil_0%": ref["taux_resiliation"].iloc[0],
-            "resil_test": ligne["taux_resiliation"],
-            "elasticite": round(eps, 2) if eps else None,
-        })
+# --- 4. ÉLASTICITÉ PAR SEGMENT (tranches agrégées, pondéré par nb) ---
+seg = (df.groupby(["segment", "majoration"])
+         .apply(lambda x: pd.Series({
+             "nb": x["nb"].sum(),
+             "resil": (x["resil"] * x["nb"]).sum() / x["nb"].sum(),  # moyenne pondérée
+         }), include_groups=False)
+         .reset_index())
+seg["retention"] = BASE - seg["resil"]
 
-res = pd.DataFrame(resultats)
-print(res)
+elast_segment = (seg.groupby("segment", group_keys=False)
+                    .apply(elasticite_arc, include_groups=False)
+                    .reset_index(drop=True))
 
-# --- 5. (Optionnel) Élasticité moyenne par segment ---
-print(res.groupby("segment")["elasticite"].mean().round(2))
+# --- 5. ÉLASTICITÉ PAR TRANCHE DANS CHAQUE SEGMENT ---
+elast_tranche = (df.groupby(["segment", "tranche"], group_keys=False)
+                   .apply(elasticite_arc, include_groups=False)
+                   .reset_index(drop=True))
+
+# =================== RÉSULTATS ===================
+
+# A) Tableau GLOBAL : élasticité par segment (segments en lignes, bras en colonnes)
+tableau_global = elast_segment.pivot_table(
+    index="segment", columns="majoration", values="elasticite")
+print("=== ÉLASTICITÉ PAR SEGMENT ===")
+print(tableau_global, "\n")
+
+# B) Un tableau par segment : élasticité par tranche de prime
+for s in elast_tranche["segment"].unique():
+    sous = (elast_tranche[elast_tranche["segment"] == s]
+            .pivot_table(index="tranche", columns="majoration", values="elasticite"))
+    print(f"=== Segment : {s} — élasticité par tranche de prime ===")
+    print(sous, "\n")
