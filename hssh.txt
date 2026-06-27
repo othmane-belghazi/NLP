@@ -1,106 +1,15 @@
-Ce projet vise à construire un modèle de  l'assurance.
-Exemple de projet :
-projet_resiliation_auto/
-│
-├── README.md
-├── requirements.txt
-├── .gitignore
-│
-├── config/
-│   ├── config.py
-│   ├── parameters.yaml
-│   └── feature_definitions.yaml
-│
-├── src/
-│   ├── __init__.py
-│   │
-│   ├── data/
-│   │   ├── __init__.py
-│   │   ├── loader.py
-│   │   ├── cleaning.py
-│   │   ├── quality_checks.py
-│   │   └── target.py
-│   │
-│   ├── features/
-│   │   ├── __init__.py
-│   │   ├── contrat.py
-│   │   ├── client.py
-│   │   ├── vehicule.py
-│   │   ├── sinistralite.py
-│   │   ├── paiement.py
-│   │   ├── comportement.py
-│   │   ├── temporelles.py
-│   │   ├── interactions.py
-│   │   └── selection.py
-│   │
-│   ├── modeling/
-│   │   ├── __init__.py
-│   │   ├── split.py
-│   │   ├── preprocessing.py
-│   │   ├── train.py
-│   │   ├── evaluate.py
-│   │   ├── calibration.py
-│   │   ├── interpret.py
-│   │   └── scoring.py
-│   │
-│   └── common/
-│       ├── __init__.py
-│       ├── spark_helpers.py
-│       ├── io_helpers.py
-│       ├── date_helpers.py
-│       └── logging_helpers.py
-│
-├── notebooks/
-│   ├── 01_data_preparation/
-│   │   ├── 01_load_explore.py
-│   │   ├── 02_quality_audit.py
-│   │   ├── 03_cleaning.py
-│   │   ├── 04_target_construction.py
-│   │   ├── 05_features_contrat.py
-│   │   ├── 06_features_client.py
-│   │   ├── 07_features_vehicule.py
-│   │   ├── 08_features_sinistralite.py
-│   │   ├── 09_features_paiement.py
-│   │   ├── 10_features_comportement.py
-│   │   ├── 11_features_temporelles.py
-│   │   ├── 12_master_table.py
-│   │   └── 13_feature_selection.py
-│   │
-│   ├── 02_eda/
-│   │   ├── 01_eda_target.py
-│   │   ├── 02_eda_features.py
-│   │   └── 03_eda_segments.py
-│   │
-│   ├── 03_modeling/
-│   │   ├── 01_train_test_split.py
-│   │   ├── 02_baseline_logistic.py
-│   │   ├── 03_train_lgbm.py
-│   │   ├── 04_train_xgboost.py
-│   │   ├── 05_hyperparameter_tuning.py
-│   │   ├── 06_evaluation.py
-│   │   ├── 07_calibration.py
-│   │   ├── 08_interpretation_shap.py
-│   │   └── 09_model_comparison.py
-│   │
-│   ├── 04_validation/
-│   │   ├── 01_stability_temporal.py
-│   │   ├── 02_performance_segments.py
-│   │   └── 03_business_validation.py
-│   │
-│   └── 05_scoring/
-│       ├── 01_scoring_pipeline.py
-│       └── 02_monitoring.py
-│
-├── tests/
-│   ├── test_cleaning.py
-│   ├── test_features.py
-│   └── test_target.py
-│
-└── docs/
-    ├── data_dictionary.md
-    ├── target_definition.md
-    ├── feature_catalog.md
-    └── modeling_decisions.md
-
-
-Enrichir cette structure de plus.
+learning_rate (0.01–0.1, log) — bas = meilleure généralisation et résolution plus fine sur le prix (plus d'arbres → seuils plus serrés). Avec un iterations élevé + early stopping, tu peux te permettre le bas de la fourchette sans coût de réglage manuel.
+depth (4–10) — c'est là que se capte l'élasticité hétérogène « pour chaque client ». La profondeur permet les interactions prix × segment de risque/profil, donc une sensibilité-prix différente selon le client. 6–8 est souvent le sweet spot ; trop profond surajuste et dégrade la calibration.
+border_count (128–1024) — directement lié à « capter une petite variante de prix ». C'est le nombre de seuils de discrétisation des features numériques : plus il est haut, plus une petite hausse de prix peut franchir un seuil et déplacer la prédiction. Vise le haut de la fourchette. Idéalement, mets un per_float_feature_quantization encore plus fin spécifiquement sur la feature prix.
+l2_leaf_reg (1–30, log) — régularise les valeurs de feuilles. Lève principale pour la généralisation et indirectement la calibration (réduit les valeurs extrêmes).
+random_strength (1e-3–10, log) — bruit ajouté au scoring des splits, régularisation contre les splits spurious.
+rsm (0.8–1.0) — colsample par niveau gardé haut volontairement : sur un modèle de demande, le prix est la feature ; le sous-échantillonner trop l'écarte de trop d'arbres et affaiblit l'élasticité.
+bootstrap_type + bagging_temperature/subsample — sous-échantillonnage de lignes pour la robustesse. MVS est le défaut CatBoost et marche bien ; je le laisse en recherche car l'optimum dépend du volume de données.
+leaf_estimation_iterations (1–10) — nombre de pas de Newton pour estimer la valeur des feuilles. Plus de pas = valeurs mieux estimées = calibration plus fine. Peu coûteux, vaut le coup de chercher.
+J'ai volontairement exclu grow_policy=Lossguide : il capte des structures plus complexes mais surajuste et dégrade la calibration plus facilement. Reste sur SymmetricTree (défaut, très régularisé). Si tu veux l'explorer, ajoute Depthwise + min_data_in_leaf (suggest_int 1–100, log) qui ne s'appliquent qu'à cette politique.
+3. Conception de l'objectif Optuna
+Deux points critiques pour que ton tuning serve réellement la mise en production :
+Validation out-of-time, pas un simple K-fold aléatoire. Tes données de renouvellement ont une structure temporelle ; valide sur une période postérieure pour mimer le déploiement et éviter les fuites. Tu peux combiner : CV temporel (folds glissants) et moyenner la LogLoss out-of-fold comme valeur d'objectif, ce qui stabilise l'estimation.
+Ne te fie pas à la LogLoss seule pour juger l'élasticité. La LogLoss est un proper scoring rule (elle pousse vers calibration + discrimination), donc c'est bien ta métrique d'optimisation. Mais ajoute une validation a posteriori du modèle retenu : score le jeu de validation à prix perturbé (+1 %, +5 %) à X constant et vérifie que la courbe de réponse-prix est monotone, lisse, et d'amplitude plausible (partial dependence sur le prix). Un modèle peut avoir une bonne LogLoss tout en ayant une réponse-prix en escalier inexploitable par l'optimiseur — c'est le piège des arbres, et c'est exactement ce que la contrainte de monotonie + border_count élevé corrigent.
+Pour le pruning Optuna, MedianPruner sur la LogLoss de validation du premier fold suffit à couper tôt les essais médiocres.
+Un dernier point : après le tuning, refais un passage de calibration (isotonic) sur un hold-out non vu pendant le tuning, et compare la LogLoss/ECE avant-après. CatBoost en LogLoss est souvent déjà bien calibré, mais sur des probabilités destinées à une fonction de profit, ça vaut la vérification.
