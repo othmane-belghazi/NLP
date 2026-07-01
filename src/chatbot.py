@@ -1,75 +1,167 @@
-flowchart TD
-    Start([▶ AutoMoteurTerme.process_task]):::entry
+"""
+Élasticité PRÉDITE à partir du modèle CatBoost de résiliation.
 
-    subgraph MOTEUR["MoteurTerme.py — Orchestrateur"]
-        direction LR
-        S1[Clean cache] --> S2[get_sources<br/>df_terme] --> S3[ScoringTerme] --> S4[JOIN BV ⨝ Scoring<br/>+ DateTerme] --> S5[ELR<br/>+ POL_PrimePure] --> S6[P3 MA + MCC<br/>unionByName]
-    end
+Principe : le modèle est la fonction de réponse. On simule (ceteris paribus)
+plusieurs niveaux de majoration, on met à jour de façon COHÉRENTE les variables
+qui en dépendent, on re-prédit, puis :
+  - courbe de réponse (résiliation / rétention moyenne du portefeuille)
+  - élasticité ponctuelle par différence finie centrée
 
-    subgraph PREP["preparation/ — Mise en forme & scope"]
-        direction LR
-        PP["Preprocessing.process<br/>fill → missing → array → mapping →<br/>cast → diff_dates → init → price_test → r0"]
-        ST[ScopeTerme<br/>in/out scope]
-        PP --> ST
-    end
+Colonnes attendues dans df (features du modèle) :
+  PRIME_PREV_COL   : PrimeN-1 (connu)
+  MAJORATION_COL   : MajorationN   (taux, ex: 0.10 = +10%)
+  PRIME_COL        : PrimeN
+  DELTA_COL        : Delta_cotis
++ toutes les autres features du modèle.
 
-    subgraph ENGINE["MajorationEngine.process — Cœur métier"]
-        direction TB
+Relations imposées (majoration = TAUX) :
+  PrimeN     = PrimeN-1 * (1 + m)
+  Delta_cotis = PrimeN - PrimeN-1 = PrimeN-1 * m
+"""
 
-        subgraph CLAIMS["① Claims & LCA"]
-            direction LR
-            CHS["Claims_hsMED<br/>transpose → duree_FD →<br/>compute → aggregate"]
-            CMED["Claims_MED<br/>transpose → compute → aggregate"]
-            CCO["CreditCo<br/>transpose → compute → aggregate"]
-            JOIN1["JOIN df ⨝<br/>claims/med/lca"]
-            CYC[Claims_ycMED]
-            DROP[drop CLA/CC<br/>cols >6/4]
-            CHS --> JOIN1
-            CMED --> JOIN1
-            CCO --> JOIN1
-            JOIN1 --> CYC --> DROP
-        end
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
-        subgraph ROW1[" "]
-            direction LR
-            SCOR["② MajoSin2<br/>MajoSinGar_F0 → MajoSinUT"]
-            CFT["③ CotisFraisTaxesELR<br/>taxes → Frais → Cotis →<br/>Cotis_hsMajo → CotisP3 → ELR"]
-            SEG["④ Segmentation<br/>Sinistralite → Mesures →<br/>Protection → MiniEuros"]
-            CHURN["⑤ ChurnModel<br/>coeffModel → ProbaModel →<br/>PriceSensitivity"]
-            SCOR --> CFT --> SEG --> CHURN
-        end
+# --- noms de colonnes (à adapter) ---
+PRIME_PREV_COL = "PrimeN_1"
+MAJORATION_COL = "MajorationN"
+PRIME_COL      = "PrimeN"
+DELTA_COL      = "Delta_cotis"
+MAJORATION_EST_TAUX = True   # False si MajorationN est un MONTANT, pas un taux
 
-        subgraph MAJ_BLOCK["⑥ ModuleMajoration"]
-            direction LR
-            subgraph MAJ_PIPE[" "]
-                direction LR
-                M1[ajust_ELR] --> M2[CCAS] --> M3[EO] --> M4[Brok] --> M5[Colla] --> M6[DmD] --> MF[(MajoFinale)] --> M7[cotis_F0]
-            end
-            subgraph MFIN["MajoFinale — 28 règles séquentielles"]
-                direction LR
-                R1["Scoring<br/>scoringSinistre →<br/>scoringMED"] --> R2["CCAS<br/>carburant → formule →<br/>marque → modeachat"] --> R3["Tolérance & butoirs<br/>tolerancesinistre → BDG_inf200 →<br/>ClientsRecents → CDB"]
-                R3 --> R4["Contrats<br/>Premature → Fragile → Remp2M →<br/>Rentables → SansAnt/EOM/MA →<br/>Jeune_T3_CUT"] --> R5["RIVierge & CRM<br/>RIVierge_hsBLD → BaisseCRM1 →<br/>RIVierge_ycBLD"] --> R6["VEH<br/>haute_gamme"]
-                R6 --> R7["Butoirs AGIRA<br/>agira →<br/>sinistreFraude"] --> R8["Butoirs surprotégés<br/>MultiEquipes → CollabAgents →<br/>SuperDetenteur_sup6"] --> R9["Finalisations<br/>extremes_pente →<br/>MonCampingCar → mini"]
-            end
-            MF -.contient.-> MFIN
-        end
 
-        subgraph POST["⑦ Post-traitements"]
-            direction LR
-            PT[PriceTest] --> AJ[Ajustement<br/>parent-child] --> CT[ComputeCT] --> CPB[CotisPlancher<br/>Butoir] --> BM[Bulle<br/>Marketing] --> FD[Franchise<br/>Degressive] --> SG[CodeSGMT] --> PE[Patch_errors] --> AX[AxaPac]
-        end
+# ------------------------------------------------------------
+# 1. Construire un scénario cohérent pour un niveau de majoration m
+# ------------------------------------------------------------
+def scenario(df, m):
+    """Retourne une copie de df avec Majoration/Prime/Delta recalculés pour m."""
+    d = df.copy()
+    p0 = d[PRIME_PREV_COL].values
+    if MAJORATION_EST_TAUX:
+        prime_n = p0 * (1.0 + m)
+        delta   = p0 * m
+    else:                                   # m est un montant absolu
+        prime_n = p0 + m
+        delta   = np.full_like(p0, m, dtype=float)
+    d[MAJORATION_COL] = m
+    d[PRIME_COL]      = prime_n
+    d[DELTA_COL]      = delta
+    return d
 
-        CLAIMS --> ROW1 --> MAJ_BLOCK --> POST
-    end
 
-    subgraph OUT["MoteurTerme — Sorties"]
-        direction LR
-        O1[MarquageISA_F0<br/>+ tech_version] --> O2[write<br/>auto_moteur_terme] --> O3[write<br/>auto_moteur_terme_ko] --> O4{write_mainframe?}
-        O4 -- oui --> O5[generate_mainframe<br/>contrats_auto_termostat]
-        O4 -- non --> Done([■ Fin])
-        O5 --> Done
-    end
+def _proba(model, d):
+    return model.predict_proba(d[model.feature_names_])[:, 1]
 
-    Start --> MOTEUR --> PREP --> ENGINE --> OUT
 
-    classDef entry fill:#1f6feb,color:#fff,stroke:#0b3d91,stroke-width:2px;
+# ------------------------------------------------------------
+# 2. Courbe de réponse du portefeuille (ou d'un segment)
+#    -> on MOYENNE les probas par contrat, pas l'inverse.
+# ------------------------------------------------------------
+def courbe_reponse(model, df, grille=None):
+    if grille is None:
+        grille = np.round(np.arange(-0.05, 0.301, 0.01), 3)   # -5% à +30%
+    lapse = np.array([_proba(model, scenario(df, m)).mean() for m in grille])
+    return pd.DataFrame({
+        "majoration": grille,
+        "resiliation": lapse,
+        "retention": 1.0 - lapse,
+    })
+
+
+# ------------------------------------------------------------
+# 3. Élasticité PONCTUELLE par différence finie centrée
+#    (au niveau contrat, au point m0 propre à chaque contrat)
+# ------------------------------------------------------------
+def elasticite_ponctuelle(model, df, m0, eps=0.01):
+    """
+    m0  : niveau de majoration où évaluer l'élasticité (scalaire ou array par contrat).
+    eps : demi-pas (0.01 = 1 point de majoration).
+
+    Retourne un DataFrame par contrat avec :
+      - dLapse_dm         : dérivée de la proba de résiliation p/r à la majoration
+      - semi_elast_pt     : points de résiliation en plus par +1 point de majoration
+      - elast_retention   : élasticité économique (rétention p/r à la prime), sans dimension
+    """
+    m0 = np.asarray(m0, dtype=float)
+    if m0.ndim == 0:
+        m0 = np.full(len(df), float(m0))
+
+    # différence centrée : on doit gérer un m0 différent par contrat
+    def proba_at(m_vec):
+        d = df.copy()
+        p0 = d[PRIME_PREV_COL].values
+        if MAJORATION_EST_TAUX:
+            d[PRIME_COL] = p0 * (1.0 + m_vec)
+            d[DELTA_COL] = p0 * m_vec
+        else:
+            d[PRIME_COL] = p0 + m_vec
+            d[DELTA_COL] = m_vec
+        d[MAJORATION_COL] = m_vec
+        return _proba(model, d)
+
+    p_plus  = proba_at(m0 + eps)
+    p_minus = proba_at(m0 - eps)
+    dlapse_dm = (p_plus - p_minus) / (2 * eps)      # par unité de m (+100%)
+
+    lapse_0   = proba_at(m0)
+    retention = 1.0 - lapse_0
+
+    # Élasticité économique de la rétention p/r à la prime :
+    #   Prime = P0*(1+m) -> dPrime/Prime = dm/(1+m)
+    #   R = 1 - lapse    -> dR = -dlapse
+    #   E = (dR/R)/(dPrime/Prime) = -(dLapse/dm)*(1+m)/R
+    if MAJORATION_EST_TAUX:
+        elast_ret = -dlapse_dm * (1.0 + m0) / np.clip(retention, 1e-6, None)
+    else:
+        elast_ret = np.full(len(df), np.nan)        # non défini simplement si montant
+
+    return pd.DataFrame({
+        "m0": m0,
+        "lapse_0": lapse_0,
+        "dLapse_dm": dlapse_dm,
+        "semi_elast_pt": dlapse_dm * 0.01,          # par +1 point de majoration
+        "elast_retention": elast_ret,
+    })
+
+
+# ------------------------------------------------------------
+# 4. Tracé
+# ------------------------------------------------------------
+def plot_elasticite(courbe, fname="elasticite.png"):
+    m = courbe["majoration"].values * 100
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.3))
+
+    ax1.plot(m, courbe["resiliation"] * 100, "o-", color="#c53030", label="Résiliation")
+    ax1.plot(m, courbe["retention"] * 100, "s--", color="#2b6cb0", label="Rétention")
+    ax1.set_xlabel("Majoration (%)"); ax1.set_ylabel("Taux (%)")
+    ax1.set_title("Courbe de réponse du portefeuille")
+    ax1.legend(); ax1.grid(alpha=0.3)
+
+    # pente locale (semi-élasticité) = dérivée de la courbe de résiliation
+    slope = np.gradient(courbe["resiliation"].values, courbe["majoration"].values) * 0.01
+    ax2.plot(m, slope * 100, "o-", color="#2f855a")
+    ax2.set_xlabel("Majoration (%)")
+    ax2.set_ylabel("Points de résiliation par +1 pt")
+    ax2.set_title("Semi-élasticité locale")
+    ax2.grid(alpha=0.3)
+
+    fig.tight_layout(); fig.savefig(fname); plt.show()
+
+
+# ------------------------------------------------------------
+# Exemple d'utilisation
+# ------------------------------------------------------------
+if __name__ == "__main__":
+    # df_te : contrats de test avec PrimeN_1 et toutes les features du modèle
+    courbe = courbe_reponse(model, df_te)                    # noqa: F821
+    print(courbe)
+    plot_elasticite(courbe)
+
+    # Élasticité au niveau de majoration réellement envisagé (ex: +8% partout,
+    # ou la colonne de majoration cible propre à chaque contrat) :
+    elast = elasticite_ponctuelle(model, df_te, m0=0.08)     # noqa: F821
+    print(elast.describe())
+    # -> semi_elast_pt : combien de points de résiliation en plus par +1 pt de hausse
+    # -> elast_retention : élasticité-prix de la rétention (négative attendue)
