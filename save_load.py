@@ -1,75 +1,94 @@
 # -*- coding: utf-8 -*-
 """
-Élasticité prédite du portefeuille — EBM résiliation au renouvellement.
+ÉLASTICITÉ PRÉDITE DU PORTEFEUILLE — Modèle EBM de résiliation tarifaire
+=========================================================================
 
-Variables tarifaires ajustées de façon COHÉRENTE à chaque choc :
-    majoration_new   = majoration + choc
-    prime_apres_new  = prime_avant * (1 + majoration_new)
-    delta_new        = prime_apres_new - prime_avant
-(prime_avant reste fixe, elle sert de base de calcul)
+MÉTHODE (3 étapes) :
+
+  1. CHOC TARIFAIRE : on décale la majoration de chaque contrat d'un
+     choc c, et on recalcule les 2 autres variables tarifaires de façon
+     cohérente à partir de Prime_N-1 (qui reste fixe) :
+
+         Majoration_N     = Majoration_N + c
+         Prime_N          = Prime_N-1 * (1 + Majoration_N)
+         Delta_cotisation = Prime_N - Prime_N-1
+
+  2. COURBE DE RÉTENTION : pour chaque choc c d'une grille (-5% à +10%),
+     on re-score le portefeuille et on calcule la rétention prédite
+     (= 1 - taux de résiliation), pondérée par la prime.
+
+  3. ÉLASTICITÉ D'ARC entre chocs adjacents :
+
+         eps = (Δ rétention / rétention) / (Δ prime / prime)
+
+     L'élasticité du portefeuille = valeur autour du choc 0.
+     Lecture : eps = -2  =>  +1% de prime  =>  -2% de rétention.
+
+NB : on utilise des chocs discrets (pas de dérivée infinitésimale) car
+les fonctions d'un EBM sont en escalier.
 """
 
 import numpy as np
 import pandas as pd
 
-# --- À adapter : noms de colonnes ---
-COL_MAJ    = "majoration"            # ex: 0.05 = +5%
-COL_APRES  = "prime_apres_renouv"
-COL_DELTA  = "delta_cotisation"
-COL_AVANT  = "prime_avant_renouv"
+COL_MAJ   = "Majoration_N"
+COL_PRIME = "Prime_N"
+COL_DELTA = "Delta_cotisation"
+COL_AVANT = "Prime_N-1"
 
 
+# ÉTAPE 1 — appliquer un choc tarifaire cohérent
 def appliquer_choc(X, choc):
-    """Renvoie une copie de X avec les 3 variables tarifaires recalculées."""
     Xs = X.copy()
-    maj_new = X[COL_MAJ] + choc
-    Xs[COL_MAJ]   = maj_new
-    Xs[COL_APRES] = X[COL_AVANT] * (1 + maj_new)
-    Xs[COL_DELTA] = Xs[COL_APRES] - X[COL_AVANT]
+    Xs[COL_MAJ]   = X[COL_MAJ] + choc
+    Xs[COL_PRIME] = X[COL_AVANT] * (1 + Xs[COL_MAJ])
+    Xs[COL_DELTA] = Xs[COL_PRIME] - X[COL_AVANT]
     return Xs
 
 
+# ÉTAPE 2 — courbe de rétention du portefeuille
 def courbe_retention(ebm, X, chocs=np.arange(-0.05, 0.101, 0.01)):
-    """Rétention prédite du portefeuille pour chaque choc de taux."""
     lignes = []
     for c in chocs:
         Xs = appliquer_choc(X, c)
-        p_resil = ebm.predict_proba(Xs)[:, 1]
-        retention = 1 - p_resil
+        taux_resil = ebm.predict_proba(Xs)[:, 1]
+        retention = 1 - taux_resil
         lignes.append({
-            "choc": c,
-            "taux_moyen": Xs[COL_MAJ].mean(),
-            "retention_contrats": retention.mean(),
-            "retention_primes": np.average(retention, weights=Xs[COL_APRES]),
-            "prime_conservee": (retention * Xs[COL_APRES]).sum(),
+            "choc": round(c, 3),
+            "majoration_moy": Xs[COL_MAJ].mean(),
+            "taux_resil_moy": taux_resil.mean(),
+            "retention_primes": np.average(retention, weights=Xs[COL_PRIME]),
         })
     return pd.DataFrame(lignes)
 
 
-def elasticite_arc(courbe, sur="retention_primes"):
-    """
-    Élasticité d'arc entre chocs adjacents :
-        eps = (Δ rétention / rétention) / (Δ prime / prime)
-    avec Δprime/prime = Δtaux / (1 + taux moyen).
-    eps = -2  =>  +1% de prime  =>  -2% de rétention.
-    """
-    r = courbe[sur].to_numpy()
-    t = courbe["taux_moyen"].to_numpy()
+# ÉTAPE 3 — élasticité d'arc
+def elasticite_arc(courbe):
+    r = courbe["retention_primes"].to_numpy()
+    t = courbe["majoration_moy"].to_numpy()
     r_mid, t_mid = (r[1:] + r[:-1]) / 2, (t[1:] + t[:-1]) / 2
     eps = (np.diff(r) / r_mid) / (np.diff(t) / (1 + t_mid))
+    chocs = courbe["choc"].to_numpy()
     return pd.DataFrame({
-        "choc_milieu": (courbe["choc"].to_numpy()[1:] + courbe["choc"].to_numpy()[:-1]) / 2,
+        "choc_milieu": (chocs[1:] + chocs[:-1]) / 2,
         "elasticite": eps,
     })
 
 
+# ---------------------------------------------------------------------
+# UTILISATION
+# ---------------------------------------------------------------------
 if __name__ == "__main__":
     # ebm = joblib.load("ebm_resiliation.pkl")
-    # X = df[ebm.feature_names_in_]
+    # X = df[ebm.feature_names_in_]        # doit contenir les 4 colonnes
 
     # courbe = courbe_retention(ebm, X)
+    # elas = elasticite_arc(courbe)
     # print(courbe)
-    # print(elasticite_arc(courbe))
-    # Élasticité globale du portefeuille = moyenne autour du choc 0 :
-    # eps_pf = elasticite_arc(courbe).query("abs(choc_milieu) <= 0.01")["elasticite"].mean()
+    # print(elas)
+
+    # Élasticité prédite du portefeuille (autour du tarif réel, choc ~ 0) :
+    # eps_portefeuille = elas.loc[elas["choc_milieu"].abs() <= 0.011,
+    #                             "elasticite"].mean()
+    # print(f"Élasticité du portefeuille : {eps_portefeuille:.2f}")
     pass
