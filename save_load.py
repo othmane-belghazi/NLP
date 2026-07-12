@@ -1,94 +1,114 @@
-# -*- coding: utf-8 -*-
-"""
-ÉLASTICITÉ PRÉDITE DU PORTEFEUILLE — Modèle EBM de résiliation tarifaire
-=========================================================================
-
-MÉTHODE (3 étapes) :
-
-  1. CHOC TARIFAIRE : on décale la majoration de chaque contrat d'un
-     choc c, et on recalcule les 2 autres variables tarifaires de façon
-     cohérente à partir de Prime_N-1 (qui reste fixe) :
-
-         Majoration_N     = Majoration_N + c
-         Prime_N          = Prime_N-1 * (1 + Majoration_N)
-         Delta_cotisation = Prime_N - Prime_N-1
-
-  2. COURBE DE RÉTENTION : pour chaque choc c d'une grille (-5% à +10%),
-     on re-score le portefeuille et on calcule la rétention prédite
-     (= 1 - taux de résiliation), pondérée par la prime.
-
-  3. ÉLASTICITÉ D'ARC entre chocs adjacents :
-
-         eps = (Δ rétention / rétention) / (Δ prime / prime)
-
-     L'élasticité du portefeuille = valeur autour du choc 0.
-     Lecture : eps = -2  =>  +1% de prime  =>  -2% de rétention.
-
-NB : on utilise des chocs discrets (pas de dérivée infinitésimale) car
-les fonctions d'un EBM sont en escalier.
-"""
-
 import numpy as np
 import pandas as pd
 
-COL_MAJ   = "Majoration_N"
-COL_PRIME = "Prime_N"
-COL_DELTA = "Delta_cotisation"
-COL_AVANT = "Prime_N-1"
+def _predict_probability(model, X):
+    """
+    Retourne la probabilité prédite de résiliation.
+    - Si le modèle a predict_proba, on prend la classe 1
+    - Sinon on utilise predict
+    """
+    if hasattr(model, "predict_proba"):
+        proba = model.predict_proba(X)
+        # Cas classique binaire
+        if proba.ndim == 2 and proba.shape[1] >= 2:
+            return proba[:, 1]
+        return proba.ravel()
+    return np.asarray(model.predict(X), dtype=float)
 
 
-# ÉTAPE 1 — appliquer un choc tarifaire cohérent
-def appliquer_choc(X, choc):
-    Xs = X.copy()
-    Xs[COL_MAJ]   = X[COL_MAJ] + choc
-    Xs[COL_PRIME] = X[COL_AVANT] * (1 + Xs[COL_MAJ])
-    Xs[COL_DELTA] = Xs[COL_PRIME] - X[COL_AVANT]
-    return Xs
+def _weighted_mean(values, weights=None):
+    values = np.asarray(values, dtype=float)
+    if weights is None:
+        return float(np.mean(values))
+    weights = np.asarray(weights, dtype=float)
+    return float(np.average(values, weights=weights))
 
 
-# ÉTAPE 2 — courbe de rétention du portefeuille
-def courbe_retention(ebm, X, chocs=np.arange(-0.05, 0.101, 0.01)):
-    lignes = []
-    for c in chocs:
-        Xs = appliquer_choc(X, c)
-        taux_resil = ebm.predict_proba(Xs)[:, 1]
-        retention = 1 - taux_resil
-        lignes.append({
-            "choc": round(c, 3),
-            "majoration_moy": Xs[COL_MAJ].mean(),
-            "taux_resil_moy": taux_resil.mean(),
-            "retention_primes": np.average(retention, weights=Xs[COL_PRIME]),
+def build_price_scenario(
+    df,
+    price_increase_pct,
+    prime_prev_col="Prime_Nm1",
+    prime_col="Prime_N",
+    delta_col="Delta_cotisation",
+    majoration_col="Majoration_N",
+):
+    """
+    Construit un scénario de prix.
+
+    Hypothèse simple :
+    - Prime_N augmente de price_increase_pct
+    - Delta_cotisation = Prime_N - Prime_Nm1
+    - Majoration_N est ajustée au même taux (à adapter si votre règle métier est différente)
+    """
+    scen = df.copy()
+
+    scen[prime_col] = scen[prime_col] * (1.0 + price_increase_pct)
+    scen[delta_col] = scen[prime_col] - scen[prime_prev_col]
+
+    # Règle simple et cohérente.
+    # Si Majoration_N a une autre définition chez vous, remplacez cette ligne.
+    scen[majoration_col] = scen[majoration_col] * (1.0 + price_increase_pct)
+
+    return scen
+
+
+def portfolio_elasticity_ebm(
+    model,
+    df,
+    feature_cols,
+    levels=(0.00, 0.02, 0.05, 0.10),
+    weight_col=None,
+    prime_prev_col="Prime_Nm1",
+    prime_col="Prime_N",
+    delta_col="Delta_cotisation",
+    majoration_col="Majoration_N",
+):
+    """
+    Calcule l'élasticité prédite du portefeuille pour plusieurs niveaux de hausse de prime.
+
+    Retour :
+    - un DataFrame avec les résultats par niveau
+    - le taux de base du portefeuille
+    - la prime moyenne de base du portefeuille
+    """
+    weights = df[weight_col].to_numpy() if weight_col is not None else None
+
+    # Base
+    X_base = df[feature_cols]
+    p0 = _predict_probability(model, X_base)
+    r0 = _weighted_mean(p0, weights)
+    prime0 = _weighted_mean(df[prime_col], weights)
+
+    results = []
+
+    for lvl in levels:
+        scen = build_price_scenario(
+            df=df,
+            price_increase_pct=lvl,
+            prime_prev_col=prime_prev_col,
+            prime_col=prime_col,
+            delta_col=delta_col,
+            majoration_col=majoration_col,
+        )
+
+        X_scen = scen[feature_cols]
+        p1 = _predict_probability(model, X_scen)
+        r1 = _weighted_mean(p1, weights)
+        prime1 = _weighted_mean(scen[prime_col], weights)
+
+        delta_rate_pct = np.nan if r0 == 0 else (r1 - r0) / r0
+        delta_prime_pct = np.nan if prime0 == 0 else (prime1 - prime0) / prime0
+        elasticity = np.nan if (not np.isfinite(delta_prime_pct) or delta_prime_pct == 0) else delta_rate_pct / delta_prime_pct
+
+        results.append({
+            "niveau_hausse": lvl,
+            "prime_base": prime0,
+            "prime_scenario": prime1,
+            "taux_resiliation_base": r0,
+            "taux_resiliation_scenario": r1,
+            "variation_rate_pct": delta_rate_pct,
+            "variation_prime_pct": delta_prime_pct,
+            "elasticite_portefeuille": elasticity,
         })
-    return pd.DataFrame(lignes)
 
-
-# ÉTAPE 3 — élasticité d'arc
-def elasticite_arc(courbe):
-    r = courbe["retention_primes"].to_numpy()
-    t = courbe["majoration_moy"].to_numpy()
-    r_mid, t_mid = (r[1:] + r[:-1]) / 2, (t[1:] + t[:-1]) / 2
-    eps = (np.diff(r) / r_mid) / (np.diff(t) / (1 + t_mid))
-    chocs = courbe["choc"].to_numpy()
-    return pd.DataFrame({
-        "choc_milieu": (chocs[1:] + chocs[:-1]) / 2,
-        "elasticite": eps,
-    })
-
-
-# ---------------------------------------------------------------------
-# UTILISATION
-# ---------------------------------------------------------------------
-if __name__ == "__main__":
-    # ebm = joblib.load("ebm_resiliation.pkl")
-    # X = df[ebm.feature_names_in_]        # doit contenir les 4 colonnes
-
-    # courbe = courbe_retention(ebm, X)
-    # elas = elasticite_arc(courbe)
-    # print(courbe)
-    # print(elas)
-
-    # Élasticité prédite du portefeuille (autour du tarif réel, choc ~ 0) :
-    # eps_portefeuille = elas.loc[elas["choc_milieu"].abs() <= 0.011,
-    #                             "elasticite"].mean()
-    # print(f"Élasticité du portefeuille : {eps_portefeuille:.2f}")
-    pass
+    return pd.DataFrame(results), r0, prime0
