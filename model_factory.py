@@ -23,4 +23,11 @@ def elasticite_portefeuille(df, model, chocs=np.arange(-0.05, 0.06, 0.01)):
 # Exemple d'utilisation
 # res = elasticite_portefeuille(df_portefeuille, mon_modele)
 # print(res)
-# res.plot(x="choc_%", y="taux_resiliation_%")   # courbe de demande
+# res.plot(x="choc_%", y="taux_resiliation_%")   # courbe de deman
+
+
+import numpy as np
+
+log_prime = np.log(1 + res["choc_%"] / 100)
+log_ret = np.log(res["retention_%"] / 100)
+elast_globale = np.polyfit(log_prime, log_ret, 1)[0]
