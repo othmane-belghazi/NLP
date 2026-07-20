@@ -216,914 +216,172 @@
 </footer>
 
 <script>
-/* ================================================================
-   DONNÉES DU RAPPORT
-   ----------------------------------------------------------------
-   Ce bloc est la SEULE partie à modifier lors d'une mise à jour.
-   Il peut être régénéré automatiquement par le script Python
-   fourni (generer_rapport.py) : chaque fonction de calcul produit
-   un "checkpoint", une "table" ou un "visuel", et l'ordre des
-   éléments dans les listes définit l'ordre d'affichage.
-   Pour ajouter / déplacer une fonction : ajouter / déplacer son
-   objet dans la liste correspondante. Rien d'autre à toucher.
-   ================================================================ */
 // ==DEBUT_DONNEES==
+/* ****************************************************************
+   *  ZONE À MODIFIER — C'EST ICI QUE VOUS METTEZ VOS RÉSULTATS   *
+   ****************************************************************
+
+   Vous exécutez vos fonctions Python de votre côté, puis vous
+   reportez les résultats ici. Rien d'autre à toucher dans le fichier.
+
+   3 types d'éléments, à copier-coller autant de fois que voulu :
+
+   ── UN POINT DE CONTRÔLE (bloc "Résultats") ─────────────────────
+   { fonction: "nom_de_ma_fonction",          // nom de votre fonction Python (affiché en petit)
+     libelle:  "Ce que vérifie le contrôle",
+     statut:   "ok",                          // "ok" | "alerte" | "ko"
+     valeur:   "48 217",                      // résultat obtenu
+     seuil:    "écart < 5 %",                 // règle appliquée
+     commentaire: "" },                       // facultatif
+
+   ── UNE TABLE (bloc "Tables & visuels") ─────────────────────────
+   { titre: "Titre de la table",
+     source_fonction: "nom_de_ma_fonction",
+     colonnes: ["Col 1", "Col 2", "Col 3"],
+     lignes: [
+       ["a", "1", "2"],
+       ["b", "3", "4"],
+     ] },
+
+   ── UN VISUEL (bloc "Tables & visuels") ─────────────────────────
+   { titre: "Titre du graphique",
+     source_fonction: "nom_de_ma_fonction",
+     type: "line",                            // "line" | "bar" | "doughnut"
+     labels: ["Janv.", "Févr.", "Mars"],
+     series: [
+       { nom: "Taux (%)", valeurs: [86.5, 86.3, 87.1] },
+       // 2e série possible (sauf doughnut) ; un nom contenant
+       // "Objectif", "Seuil" ou "Cible" s'affiche en pointillés
+     ] },
+
+   Règles simples :
+   - L'ORDRE dans les listes = l'ordre d'affichage à l'écran.
+     Pour déplacer un contrôle : déplacer son bloc { ... }.
+   - Pour retirer un contrôle : supprimer son bloc, ou ajouter
+     "//" au début de chacune de ses lignes pour le désactiver.
+   - Les compteurs OK / alertes / KO des cartes d'accueil se
+     calculent automatiquement à partir des statuts.
+   - Attention aux virgules entre les blocs { ... }, { ... }.
+   **************************************************************** */
+
 const RAPPORT = {
-  "meta": {
-    "periode": "Juin 2026",
-    "genere_le": "2026-07-20 08:45"
+
+  meta: {
+    periode:   "Juin 2026",          // période analysée
+    genere_le: "2026-07-20",         // date de mise à jour
   },
-  "ordre_sections": [
-    "globale",
-    "agents",
-    "courtier",
-    "annexe",
-    "hors_ko"
-  ],
-  "sections": {
-    "globale": {
-      "libelle": "Globale",
-      "description": "Portefeuille auto complet — tous réseaux de distribution confondus.",
-      "kpis": [
-        {
-          "label": "Contrats à renouveler",
-          "valeur": "48 217"
-        },
-        {
-          "label": "Taux de renouvellement",
-          "valeur": "87,4 %"
-        },
-        {
-          "label": "Prime moyenne",
-          "valeur": "512 €"
-        },
-        {
-          "label": "Évolution prime",
-          "valeur": "+3,1 %"
-        }
+
+  // Ordre d'affichage des 5 blocs sur la page d'accueil
+  ordre_sections: ["globale", "agents", "courtier", "annexe", "hors_ko"],
+
+  sections: {
+
+    /* ═══════════════════ 1. GLOBALE ═══════════════════ */
+    globale: {
+      libelle: "Globale",
+      description: "Portefeuille auto complet — tous réseaux confondus.",
+
+      // KPI affichés en bandeau (facultatif — laisser [] si aucun)
+      kpis: [
+        { label: "Contrats à renouveler", valeur: "48 217" },
+        { label: "Taux de renouvellement", valeur: "87,4 %" },
       ],
-      "checkpoints": [
-        {
-          "fonction": "verif_volumetrie",
-          "libelle": "Volumétrie du portefeuille vs mois précédent",
-          "statut": "ok",
-          "valeur": "48 217",
-          "seuil": "écart < 5 %",
-          "commentaire": "Écart de +1,8 % par rapport à mai 2026, dans la tolérance."
-        },
-        {
-          "fonction": "verif_taux_renouvellement",
-          "libelle": "Taux de renouvellement global",
-          "statut": "ok",
-          "valeur": "87,4 %",
-          "seuil": "≥ 85 %",
-          "commentaire": ""
-        },
-        {
-          "fonction": "verif_prime_moyenne",
-          "libelle": "Cohérence de la prime moyenne renouvelée",
-          "statut": "alerte",
-          "valeur": "+3,1 %",
-          "seuil": "entre 0 % et +2,5 %",
-          "commentaire": "Hausse tirée par le segment jeunes conducteurs ; à confirmer avec la tarification."
-        },
-        {
-          "fonction": "verif_doublons_police",
-          "libelle": "Absence de doublons de numéro de police",
-          "statut": "ok",
-          "valeur": "0 doublon",
-          "seuil": "= 0",
-          "commentaire": ""
-        },
-        {
-          "fonction": "verif_contrats_sans_decision",
-          "libelle": "Contrats sans décision de renouvellement",
-          "statut": "ko",
-          "valeur": "312",
-          "seuil": "< 100",
-          "commentaire": "Concentration sur le lot du 15/06 — à réinjecter dans la chaîne de décision."
-        },
-        {
-          "fonction": "verif_ecart_tarifaire",
-          "libelle": "Écarts tarifaires extrêmes (> ±25 %)",
-          "statut": "alerte",
-          "valeur": "1,9 %",
-          "seuil": "< 1,5 %",
-          "commentaire": "142 contrats au-delà du plafond de majoration ; revue tarifaire recommandée."
-        }
+
+      // ---- Bloc 1 : Résultats — vos points de contrôle ----
+      checkpoints: [
+        { fonction: "verif_volumetrie",
+          libelle: "Volumétrie du portefeuille vs mois précédent",
+          statut: "ok", valeur: "48 217", seuil: "écart < 5 %",
+          commentaire: "Exemple : remplacez par les résultats de vos fonctions." },
+        { fonction: "verif_taux_renouvellement",
+          libelle: "Taux de renouvellement global",
+          statut: "alerte", valeur: "84,6 %", seuil: "≥ 85 %",
+          commentaire: "" },
+        // ➜ ajoutez vos autres contrôles ici
       ],
-      "tables": [
-        {
-          "titre": "Synthèse mensuelle des renouvellements",
-          "source_fonction": "table_synthese_mensuelle",
-          "colonnes": [
-            "Mois",
-            "À renouveler",
-            "Renouvelés",
-            "Résiliés",
-            "Taux (%)",
-            "Prime moy. (€)"
-          ],
-          "lignes": [
-            [
-              "Janv. 2026",
-              "46 102",
-              "39 870",
-              "6 232",
-              "86,5",
-              "497"
-            ],
-            [
-              "Févr. 2026",
-              "45 880",
-              "39 615",
-              "6 265",
-              "86,3",
-              "499"
-            ],
-            [
-              "Mars 2026",
-              "47 013",
-              "40 950",
-              "6 063",
-              "87,1",
-              "503"
-            ],
-            [
-              "Avr. 2026",
-              "46 540",
-              "40 490",
-              "6 050",
-              "87,0",
-              "506"
-            ],
-            [
-              "Mai 2026",
-              "47 370",
-              "41 290",
-              "6 080",
-              "87,2",
-              "508"
-            ],
-            [
-              "Juin 2026",
-              "48 217",
-              "42 142",
-              "6 075",
-              "87,4",
-              "512"
-            ]
-          ]
-        },
-        {
-          "titre": "Répartition par réseau de distribution",
-          "source_fonction": "table_repartition_reseau",
-          "colonnes": [
-            "Réseau",
-            "Contrats",
-            "Part (%)",
-            "Taux renouv. (%)",
-            "Prime moy. (€)"
-          ],
-          "lignes": [
-            [
-              "Agents",
-              "21 480",
-              "44,5",
-              "89,1",
-              "524"
-            ],
-            [
-              "Courtiers",
-              "15 210",
-              "31,5",
-              "85,2",
-              "531"
-            ],
-            [
-              "Annexe",
-              "8 940",
-              "18,5",
-              "88,0",
-              "462"
-            ],
-            [
-              "Hors KO",
-              "2 587",
-              "5,5",
-              "82,6",
-              "488"
-            ]
-          ]
-        }
+
+      // ---- Bloc 2 : Tables & visuels ----
+      tables: [
+        { titre: "Synthèse mensuelle des renouvellements",
+          source_fonction: "table_synthese_mensuelle",
+          colonnes: ["Mois", "À renouveler", "Renouvelés", "Taux (%)"],
+          lignes: [
+            ["Mai 2026", "47 370", "41 290", "87,2"],
+            ["Juin 2026", "48 217", "42 142", "87,4"],
+          ] },
+        // ➜ ajoutez vos autres tables ici
       ],
-      "visuels": [
-        {
-          "titre": "Évolution du taux de renouvellement (12 mois)",
-          "source_fonction": "visuel_evolution_taux",
-          "type": "line",
-          "labels": [
-            "Juil.",
-            "Août",
-            "Sept.",
-            "Oct.",
-            "Nov.",
-            "Déc.",
-            "Janv.",
-            "Févr.",
-            "Mars",
-            "Avr.",
-            "Mai",
-            "Juin"
-          ],
-          "series": [
-            {
-              "nom": "Taux renouvellement (%)",
-              "valeurs": [
-                85.9,
-                86.1,
-                86.4,
-                86.2,
-                86.8,
-                86.6,
-                86.5,
-                86.3,
-                87.1,
-                87.0,
-                87.2,
-                87.4
-              ]
-            },
-            {
-              "nom": "Objectif (%)",
-              "valeurs": [
-                85,
-                85,
-                85,
-                85,
-                85,
-                85,
-                85,
-                85,
-                85,
-                85,
-                85,
-                85
-              ]
-            }
-          ]
-        },
-        {
-          "titre": "Contrats renouvelés par réseau",
-          "source_fonction": "visuel_volumes_reseau",
-          "type": "bar",
-          "labels": [
-            "Agents",
-            "Courtiers",
-            "Annexe",
-            "Hors KO"
-          ],
-          "series": [
-            {
-              "nom": "Renouvelés",
-              "valeurs": [
-                19139,
-                12959,
-                7867,
-                2137
-              ]
-            },
-            {
-              "nom": "Résiliés",
-              "valeurs": [
-                2341,
-                2251,
-                1073,
-                450
-              ]
-            }
-          ]
-        },
-        {
-          "titre": "Répartition du portefeuille",
-          "source_fonction": "visuel_repartition_portefeuille",
-          "type": "doughnut",
-          "labels": [
-            "Agents",
-            "Courtiers",
-            "Annexe",
-            "Hors KO"
-          ],
-          "series": [
-            {
-              "nom": "Part",
-              "valeurs": [
-                44.5,
-                31.5,
-                18.5,
-                5.5
-              ]
-            }
-          ]
-        }
-      ]
+
+      visuels: [
+        { titre: "Évolution du taux de renouvellement",
+          source_fonction: "visuel_evolution_taux",
+          type: "line",
+          labels: ["Janv.", "Févr.", "Mars", "Avr.", "Mai", "Juin"],
+          series: [
+            { nom: "Taux (%)", valeurs: [86.5, 86.3, 87.1, 87.0, 87.2, 87.4] },
+            { nom: "Objectif (%)", valeurs: [85, 85, 85, 85, 85, 85] },
+          ] },
+        // ➜ ajoutez vos autres visuels ici
+      ],
     },
-    "agents": {
-      "libelle": "Agents",
-      "description": "Réseau des agents généraux mandataires.",
-      "kpis": [
-        {
-          "label": "Contrats à renouveler",
-          "valeur": "21 480"
-        },
-        {
-          "label": "Taux de renouvellement",
-          "valeur": "89,1 %"
-        },
-        {
-          "label": "Prime moyenne",
-          "valeur": "524 €"
-        }
+
+    /* ═══════════════════ 2. AGENTS ═══════════════════ */
+    agents: {
+      libelle: "Agents",
+      description: "Réseau des agents généraux mandataires.",
+      kpis: [],
+      checkpoints: [
+        { fonction: "ma_fonction_exemple",
+          libelle: "Exemple de contrôle — à remplacer par les vôtres",
+          statut: "ok", valeur: "—", seuil: "—", commentaire: "" },
       ],
-      "checkpoints": [
-        {
-          "fonction": "verif_volumetrie_agents",
-          "libelle": "Volumétrie du réseau agents",
-          "statut": "ok",
-          "valeur": "21 480",
-          "seuil": "écart < 5 %",
-          "commentaire": ""
-        },
-        {
-          "fonction": "verif_taux_agents",
-          "libelle": "Taux de renouvellement du réseau",
-          "statut": "ok",
-          "valeur": "89,1 %",
-          "seuil": "≥ 86 %",
-          "commentaire": ""
-        },
-        {
-          "fonction": "verif_dispersion_agences",
-          "libelle": "Dispersion des taux entre agences",
-          "statut": "alerte",
-          "valeur": "σ = 4,8 pts",
-          "seuil": "σ < 4 pts",
-          "commentaire": "3 agences sous 78 % de renouvellement : suivi commercial engagé."
-        },
-        {
-          "fonction": "verif_commissions",
-          "libelle": "Cohérence des taux de commission appliqués",
-          "statut": "ok",
-          "valeur": "0 anomalie",
-          "seuil": "= 0",
-          "commentaire": ""
-        }
-      ],
-      "tables": [
-        {
-          "titre": "Top / Flop agences par taux de renouvellement",
-          "source_fonction": "table_top_flop_agences",
-          "colonnes": [
-            "Agence",
-            "Région",
-            "Contrats",
-            "Taux (%)",
-            "Écart vs réseau (pts)"
-          ],
-          "lignes": [
-            [
-              "AG-0147",
-              "Nord",
-              "612",
-              "94,2",
-              "+5,1"
-            ],
-            [
-              "AG-0093",
-              "Ouest",
-              "540",
-              "93,6",
-              "+4,5"
-            ],
-            [
-              "AG-0211",
-              "Sud-Est",
-              "498",
-              "92,8",
-              "+3,7"
-            ],
-            [
-              "AG-0305",
-              "Centre",
-              "371",
-              "77,9",
-              "-11,2"
-            ],
-            [
-              "AG-0188",
-              "Sud-Ouest",
-              "402",
-              "77,1",
-              "-12,0"
-            ],
-            [
-              "AG-0276",
-              "Est",
-              "356",
-              "76,4",
-              "-12,7"
-            ]
-          ]
-        }
-      ],
-      "visuels": [
-        {
-          "titre": "Taux de renouvellement par région",
-          "source_fonction": "visuel_taux_regions_agents",
-          "type": "bar",
-          "labels": [
-            "Nord",
-            "Ouest",
-            "Est",
-            "Centre",
-            "Sud-Est",
-            "Sud-Ouest"
-          ],
-          "series": [
-            {
-              "nom": "Taux (%)",
-              "valeurs": [
-                90.4,
-                89.8,
-                88.2,
-                88.9,
-                89.5,
-                87.6
-              ]
-            }
-          ]
-        },
-        {
-          "titre": "Évolution mensuelle du taux — réseau agents",
-          "source_fonction": "visuel_evolution_agents",
-          "type": "line",
-          "labels": [
-            "Janv.",
-            "Févr.",
-            "Mars",
-            "Avr.",
-            "Mai",
-            "Juin"
-          ],
-          "series": [
-            {
-              "nom": "Taux (%)",
-              "valeurs": [
-                88.2,
-                88.0,
-                88.7,
-                88.9,
-                89.0,
-                89.1
-              ]
-            }
-          ]
-        }
-      ]
+      tables: [],
+      visuels: [],
     },
-    "courtier": {
-      "libelle": "Courtier",
-      "description": "Portefeuille apporté par le réseau de courtage.",
-      "kpis": [
-        {
-          "label": "Contrats à renouveler",
-          "valeur": "15 210"
-        },
-        {
-          "label": "Taux de renouvellement",
-          "valeur": "85,2 %"
-        },
-        {
-          "label": "Prime moyenne",
-          "valeur": "531 €"
-        }
+
+    /* ═══════════════════ 3. COURTIER ═══════════════════ */
+    courtier: {
+      libelle: "Courtier",
+      description: "Portefeuille apporté par le réseau de courtage.",
+      kpis: [],
+      checkpoints: [
+        { fonction: "ma_fonction_exemple",
+          libelle: "Exemple de contrôle — à remplacer par les vôtres",
+          statut: "ok", valeur: "—", seuil: "—", commentaire: "" },
       ],
-      "checkpoints": [
-        {
-          "fonction": "verif_volumetrie_courtiers",
-          "libelle": "Volumétrie du réseau courtage",
-          "statut": "ok",
-          "valeur": "15 210",
-          "seuil": "écart < 5 %",
-          "commentaire": ""
-        },
-        {
-          "fonction": "verif_taux_courtiers",
-          "libelle": "Taux de renouvellement du réseau",
-          "statut": "alerte",
-          "valeur": "85,2 %",
-          "seuil": "≥ 86 %",
-          "commentaire": "Léger retrait, concentré sur 2 courtiers grossistes."
-        },
-        {
-          "fonction": "verif_concentration",
-          "libelle": "Concentration du portefeuille (top 5 courtiers)",
-          "statut": "alerte",
-          "valeur": "41 %",
-          "seuil": "< 40 %",
-          "commentaire": "Dépendance en hausse ; à suivre au comité distribution."
-        },
-        {
-          "fonction": "verif_delais_emission",
-          "libelle": "Délai moyen d'émission des avenants",
-          "statut": "ok",
-          "valeur": "3,2 j",
-          "seuil": "< 5 j",
-          "commentaire": ""
-        }
-      ],
-      "tables": [
-        {
-          "titre": "Principaux courtiers — activité de renouvellement",
-          "source_fonction": "table_top_courtiers",
-          "colonnes": [
-            "Courtier",
-            "Contrats",
-            "Taux (%)",
-            "Prime moy. (€)",
-            "Évol. prime (%)"
-          ],
-          "lignes": [
-            [
-              "CRT-Alpha",
-              "2 140",
-              "86,8",
-              "545",
-              "+2,4"
-            ],
-            [
-              "CRT-Meridien",
-              "1 870",
-              "83,1",
-              "528",
-              "+3,8"
-            ],
-            [
-              "CRT-Atlantique",
-              "1 260",
-              "84,0",
-              "519",
-              "+3,2"
-            ],
-            [
-              "CRT-Provence",
-              "980",
-              "87,5",
-              "552",
-              "+1,9"
-            ],
-            [
-              "CRT-Nordis",
-              "860",
-              "82,3",
-              "507",
-              "+4,1"
-            ]
-          ]
-        }
-      ],
-      "visuels": [
-        {
-          "titre": "Taux de renouvellement — top courtiers",
-          "source_fonction": "visuel_taux_courtiers",
-          "type": "bar",
-          "labels": [
-            "Alpha",
-            "Meridien",
-            "Atlantique",
-            "Provence",
-            "Nordis"
-          ],
-          "series": [
-            {
-              "nom": "Taux (%)",
-              "valeurs": [
-                86.8,
-                83.1,
-                84.0,
-                87.5,
-                82.3
-              ]
-            }
-          ]
-        },
-        {
-          "titre": "Évolution mensuelle du taux — courtage",
-          "source_fonction": "visuel_evolution_courtiers",
-          "type": "line",
-          "labels": [
-            "Janv.",
-            "Févr.",
-            "Mars",
-            "Avr.",
-            "Mai",
-            "Juin"
-          ],
-          "series": [
-            {
-              "nom": "Taux (%)",
-              "valeurs": [
-                85.9,
-                85.6,
-                85.8,
-                85.5,
-                85.4,
-                85.2
-              ]
-            }
-          ]
-        }
-      ]
+      tables: [],
+      visuels: [],
     },
-    "annexe": {
-      "libelle": "Annexe",
-      "description": "Canaux annexes : partenariats, affinitaire et vente directe.",
-      "kpis": [
-        {
-          "label": "Contrats à renouveler",
-          "valeur": "8 940"
-        },
-        {
-          "label": "Taux de renouvellement",
-          "valeur": "88,0 %"
-        },
-        {
-          "label": "Prime moyenne",
-          "valeur": "462 €"
-        }
+
+    /* ═══════════════════ 4. ANNEXE ═══════════════════ */
+    annexe: {
+      libelle: "Annexe",
+      description: "Canaux annexes : partenariats, affinitaire, direct.",
+      kpis: [],
+      checkpoints: [
+        { fonction: "ma_fonction_exemple",
+          libelle: "Exemple de contrôle — à remplacer par les vôtres",
+          statut: "ok", valeur: "—", seuil: "—", commentaire: "" },
       ],
-      "checkpoints": [
-        {
-          "fonction": "verif_volumetrie_annexe",
-          "libelle": "Volumétrie des canaux annexes",
-          "statut": "ok",
-          "valeur": "8 940",
-          "seuil": "écart < 5 %",
-          "commentaire": ""
-        },
-        {
-          "fonction": "verif_taux_annexe",
-          "libelle": "Taux de renouvellement des canaux annexes",
-          "statut": "ok",
-          "valeur": "88,0 %",
-          "seuil": "≥ 85 %",
-          "commentaire": ""
-        },
-        {
-          "fonction": "verif_partenariats",
-          "libelle": "Complétude des flux partenaires",
-          "statut": "ok",
-          "valeur": "12/12 flux reçus",
-          "seuil": "= 12",
-          "commentaire": ""
-        }
-      ],
-      "tables": [
-        {
-          "titre": "Détail par canal annexe",
-          "source_fonction": "table_detail_annexe",
-          "colonnes": [
-            "Canal",
-            "Contrats",
-            "Taux (%)",
-            "Prime moy. (€)"
-          ],
-          "lignes": [
-            [
-              "Partenariat bancaire",
-              "4 320",
-              "89,3",
-              "471"
-            ],
-            [
-              "Affinitaire auto",
-              "2 610",
-              "87,1",
-              "448"
-            ],
-            [
-              "Vente directe web",
-              "2 010",
-              "86,5",
-              "459"
-            ]
-          ]
-        }
-      ],
-      "visuels": [
-        {
-          "titre": "Répartition des contrats par canal",
-          "source_fonction": "visuel_repartition_annexe",
-          "type": "doughnut",
-          "labels": [
-            "Partenariat bancaire",
-            "Affinitaire",
-            "Direct web"
-          ],
-          "series": [
-            {
-              "nom": "Contrats",
-              "valeurs": [
-                4320,
-                2610,
-                2010
-              ]
-            }
-          ]
-        },
-        {
-          "titre": "Évolution mensuelle du taux — annexe",
-          "source_fonction": "visuel_evolution_annexe",
-          "type": "line",
-          "labels": [
-            "Janv.",
-            "Févr.",
-            "Mars",
-            "Avr.",
-            "Mai",
-            "Juin"
-          ],
-          "series": [
-            {
-              "nom": "Taux (%)",
-              "valeurs": [
-                87.1,
-                87.3,
-                87.6,
-                87.8,
-                87.9,
-                88.0
-              ]
-            }
-          ]
-        }
-      ]
+      tables: [],
+      visuels: [],
     },
-    "hors_ko": {
-      "libelle": "Hors KO",
-      "description": "Contrats exclus des rejets techniques (KO) — périmètre de contrôle qualité.",
-      "kpis": [
-        {
-          "label": "Contrats concernés",
-          "valeur": "2 587"
-        },
-        {
-          "label": "Taux de renouvellement",
-          "valeur": "82,6 %"
-        },
-        {
-          "label": "Taux de rejet résiduel",
-          "valeur": "0,7 %"
-        }
+
+    /* ═══════════════════ 5. HORS KO ═══════════════════ */
+    hors_ko: {
+      libelle: "Hors KO",
+      description: "Périmètre hors rejets techniques (KO).",
+      kpis: [],
+      checkpoints: [
+        { fonction: "ma_fonction_exemple",
+          libelle: "Exemple de contrôle — à remplacer par les vôtres",
+          statut: "ok", valeur: "—", seuil: "—", commentaire: "" },
       ],
-      "checkpoints": [
-        {
-          "fonction": "verif_volumetrie_hors_ko",
-          "libelle": "Volumétrie du périmètre hors KO",
-          "statut": "ok",
-          "valeur": "2 587",
-          "seuil": "écart < 10 %",
-          "commentaire": ""
-        },
-        {
-          "fonction": "verif_rejets_residuels",
-          "libelle": "Rejets résiduels après retraitement",
-          "statut": "ok",
-          "valeur": "0,7 %",
-          "seuil": "< 1 %",
-          "commentaire": ""
-        },
-        {
-          "fonction": "verif_reprises",
-          "libelle": "Contrats repris dans la chaîne après correction",
-          "statut": "alerte",
-          "valeur": "91 %",
-          "seuil": "≥ 95 %",
-          "commentaire": "234 contrats en attente de reprise ; correction planifiée au batch du 22/07."
-        },
-        {
-          "fonction": "verif_anciennete_ko",
-          "libelle": "Ancienneté maximale des KO non traités",
-          "statut": "ko",
-          "valeur": "38 j",
-          "seuil": "< 30 j",
-          "commentaire": "8 dossiers au-delà du délai cible — escalade au support applicatif."
-        }
-      ],
-      "tables": [
-        {
-          "titre": "Motifs de rejet et retraitement",
-          "source_fonction": "table_motifs_ko",
-          "colonnes": [
-            "Motif",
-            "Occurrences",
-            "Repris",
-            "En attente",
-            "Ancienneté max (j)"
-          ],
-          "lignes": [
-            [
-              "Référence tarifaire absente",
-              "914",
-              "880",
-              "34",
-              "21"
-            ],
-            [
-              "Incohérence bonus-malus",
-              "687",
-              "640",
-              "47",
-              "38"
-            ],
-            [
-              "Adresse invalide",
-              "512",
-              "471",
-              "41",
-              "17"
-            ],
-            [
-              "Pièce manquante",
-              "474",
-              "362",
-              "112",
-              "26"
-            ]
-          ]
-        }
-      ],
-      "visuels": [
-        {
-          "titre": "Occurrences par motif de rejet",
-          "source_fonction": "visuel_motifs_ko",
-          "type": "bar",
-          "labels": [
-            "Réf. tarifaire",
-            "Bonus-malus",
-            "Adresse",
-            "Pièce manquante"
-          ],
-          "series": [
-            {
-              "nom": "Repris",
-              "valeurs": [
-                880,
-                640,
-                471,
-                362
-              ]
-            },
-            {
-              "nom": "En attente",
-              "valeurs": [
-                34,
-                47,
-                41,
-                112
-              ]
-            }
-          ]
-        },
-        {
-          "titre": "Évolution du stock de KO non traités",
-          "source_fonction": "visuel_stock_ko",
-          "type": "line",
-          "labels": [
-            "Janv.",
-            "Févr.",
-            "Mars",
-            "Avr.",
-            "Mai",
-            "Juin"
-          ],
-          "series": [
-            {
-              "nom": "Stock en attente",
-              "valeurs": [
-                310,
-                289,
-                265,
-                258,
-                241,
-                234
-              ]
-            }
-          ]
-        }
-      ]
-    }
-  }
+      tables: [],
+      visuels: [],
+    },
+
+  },
 };
 // ==FIN_DONNEES==
 
