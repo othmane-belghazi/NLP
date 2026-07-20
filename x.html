@@ -1,4 +1,160 @@
-<!DOCTYPE html>
+# Databricks notebook source
+# ============================================================================
+#  RAPPORT DE MONITORING — RENOUVELLEMENTS ASSURANCE AUTO (version Databricks)
+# ============================================================================
+#  Tout tient dans cette cellule (ou copiez-la dans un notebook %run).
+#
+#  PRINCIPE : ce qui s'affiche = l'OUTPUT de vos fonctions déjà codées.
+#  Vous n'avez qu'à enregistrer vos fonctions dans le PIPELINE (tout en bas),
+#  section par section. L'ordre dans la liste = l'ordre d'affichage.
+#
+#  Ce que peut retourner une fonction (détection automatique) :
+#    - un DataFrame pandas ou Spark ................ affiché en TABLE
+#    - une figure matplotlib ....................... affichée en IMAGE
+#    - un dict {"statut": "ok"|"alerte"|"ko", ...} . affiché en POINT DE CONTRÔLE
+#    - un dict {"labels": [...], "series": [...]} .. affiché en GRAPHIQUE Chart.js
+#    - un dict {"colonnes": [...], "lignes": [...]}  affiché en TABLE
+#    - une LISTE de tout cela ...................... plusieurs affichages
+#  Vous pouvez aussi utiliser les aides checkpoint() / table() / visuel()
+#  pour un contrôle total, mais ce n'est pas obligatoire.
+#
+#  Dernière ligne : displayHTML(...) affiche le rapport interactif.
+# ============================================================================
+
+import base64
+import io
+import json
+from datetime import datetime
+
+# ----------------------------------------------------------------------------
+# AIDES FACULTATIVES — à utiliser dans vos fonctions si vous voulez
+# préciser titre, statut, seuil, etc. Sinon la détection auto s'en charge.
+# ----------------------------------------------------------------------------
+def checkpoint(libelle, statut, valeur, seuil="", commentaire=""):
+    """statut : 'ok' | 'alerte' | 'ko'"""
+    return {"_type": "checkpoint", "libelle": libelle, "statut": statut,
+            "valeur": str(valeur), "seuil": str(seuil), "commentaire": commentaire}
+
+def table(titre, colonnes, lignes):
+    return {"_type": "table", "titre": titre, "colonnes": list(colonnes),
+            "lignes": [[str(v) for v in l] for l in lignes]}
+
+def visuel(titre, type_graph, labels, series):
+    """type_graph : 'line' | 'bar' | 'doughnut'
+       series : [{"nom": "...", "valeurs": [...]}, ...]"""
+    return {"_type": "visuel", "titre": titre, "type": type_graph,
+            "labels": list(labels), "series": series}
+
+# ----------------------------------------------------------------------------
+# DÉTECTION AUTOMATIQUE de l'output d'une fonction — ne pas modifier
+# ----------------------------------------------------------------------------
+_MAX_LIGNES_TABLE = 500  # sécurité d'affichage pour les DataFrames
+
+def _df_pandas_en_table(df, titre):
+    df = df.head(_MAX_LIGNES_TABLE)
+    return table(titre, [str(c) for c in df.columns],
+                 df.astype(str).values.tolist())
+
+def _figure_en_image(fig, titre):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=110, bbox_inches="tight")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return {"_type": "visuel", "titre": titre, "type": "image",
+            "contenu": "data:image/png;base64," + b64}
+
+def _normaliser(sortie, nom_fonction):
+    """Transforme l'output brut d'une fonction en éléments affichables."""
+    if sortie is None:
+        return []
+    if isinstance(sortie, (list, tuple)):
+        elements = []
+        for s in sortie:
+            elements.extend(_normaliser(s, nom_fonction))
+        return elements
+
+    # Dict : déjà typé par les aides, ou reconnu par ses clés
+    if isinstance(sortie, dict):
+        d = dict(sortie)
+        if "_type" not in d:
+            if "statut" in d:
+                d.setdefault("libelle", nom_fonction)
+                d.setdefault("valeur", "")
+                d.setdefault("seuil", "")
+                d.setdefault("commentaire", "")
+                d["_type"] = "checkpoint"
+            elif "labels" in d and "series" in d:
+                d.setdefault("titre", nom_fonction)
+                d.setdefault("type", "bar")
+                d["_type"] = "visuel"
+            elif "colonnes" in d and "lignes" in d:
+                d.setdefault("titre", nom_fonction)
+                d["_type"] = "table"
+            else:  # dict simple {label: valeur} -> table à 2 colonnes
+                return [table(nom_fonction, ["Indicateur", "Valeur"],
+                              [[k, v] for k, v in d.items()])]
+        if d["_type"] == "checkpoint":
+            d["valeur"] = str(d.get("valeur", ""))
+        return [d]
+
+    # DataFrame Spark
+    if hasattr(sortie, "toPandas"):
+        return [_df_pandas_en_table(sortie.limit(_MAX_LIGNES_TABLE).toPandas(),
+                                    nom_fonction)]
+    # DataFrame pandas
+    if hasattr(sortie, "columns") and hasattr(sortie, "values"):
+        return [_df_pandas_en_table(sortie, nom_fonction)]
+    # Figure matplotlib
+    if hasattr(sortie, "savefig"):
+        return [_figure_en_image(sortie, nom_fonction)]
+    # Axes matplotlib
+    if hasattr(sortie, "get_figure"):
+        return [_figure_en_image(sortie.get_figure(), nom_fonction)]
+
+    # Tout le reste (str, nombre...) -> point d'information neutre
+    return [checkpoint(libelle=nom_fonction, statut="ok", valeur=str(sortie))]
+
+# ----------------------------------------------------------------------------
+# ASSEMBLAGE ET AFFICHAGE — ne pas modifier
+# ----------------------------------------------------------------------------
+def generer_rapport(pipeline, periode=""):
+    rapport = {
+        "meta": {"periode": periode or datetime.now().strftime("%B %Y"),
+                 "genere_le": datetime.now().strftime("%Y-%m-%d %H:%M")},
+        "ordre_sections": list(pipeline.keys()),
+        "sections": {},
+    }
+    for cle, cfg in pipeline.items():
+        section = {"libelle": cfg.get("libelle", cle),
+                   "description": cfg.get("description", ""),
+                   "kpis": [{"label": k, "valeur": str(v)}
+                            for k, v in cfg.get("kpis", {}).items()],
+                   "checkpoints": [], "tables": [], "visuels": []}
+        for fonction in cfg.get("fonctions", []):
+            nom = getattr(fonction, "__name__", str(fonction))
+            try:
+                elements = _normaliser(fonction(), nom)
+            except Exception as e:  # une fonction en erreur devient un KO visible
+                elements = [checkpoint(libelle=f"Exécution de {nom}",
+                                       statut="ko", valeur="ERREUR",
+                                       commentaire=str(e))]
+            for el in elements:
+                el.setdefault("source_fonction", nom)
+                genre = el.pop("_type")
+                if genre == "checkpoint":
+                    el["fonction"] = el.pop("source_fonction")
+                    section["checkpoints"].append(el)
+                elif genre == "table":
+                    section["tables"].append(el)
+                else:
+                    section["visuels"].append(el)
+        rapport["sections"][cle] = section
+    return _GABARIT_HTML.replace("__DONNEES_JSON__",
+                                 json.dumps(rapport, ensure_ascii=False))
+
+# ----------------------------------------------------------------------------
+# GABARIT HTML (design, interactions, graphiques) — ne pas modifier
+# ----------------------------------------------------------------------------
+_GABARIT_HTML = r"""<!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
@@ -216,174 +372,7 @@
 </footer>
 
 <script>
-// ==DEBUT_DONNEES==
-/* ****************************************************************
-   *  ZONE À MODIFIER — C'EST ICI QUE VOUS METTEZ VOS RÉSULTATS   *
-   ****************************************************************
-
-   Vous exécutez vos fonctions Python de votre côté, puis vous
-   reportez les résultats ici. Rien d'autre à toucher dans le fichier.
-
-   3 types d'éléments, à copier-coller autant de fois que voulu :
-
-   ── UN POINT DE CONTRÔLE (bloc "Résultats") ─────────────────────
-   { fonction: "nom_de_ma_fonction",          // nom de votre fonction Python (affiché en petit)
-     libelle:  "Ce que vérifie le contrôle",
-     statut:   "ok",                          // "ok" | "alerte" | "ko"
-     valeur:   "48 217",                      // résultat obtenu
-     seuil:    "écart < 5 %",                 // règle appliquée
-     commentaire: "" },                       // facultatif
-
-   ── UNE TABLE (bloc "Tables & visuels") ─────────────────────────
-   { titre: "Titre de la table",
-     source_fonction: "nom_de_ma_fonction",
-     colonnes: ["Col 1", "Col 2", "Col 3"],
-     lignes: [
-       ["a", "1", "2"],
-       ["b", "3", "4"],
-     ] },
-
-   ── UN VISUEL (bloc "Tables & visuels") ─────────────────────────
-   { titre: "Titre du graphique",
-     source_fonction: "nom_de_ma_fonction",
-     type: "line",                            // "line" | "bar" | "doughnut"
-     labels: ["Janv.", "Févr.", "Mars"],
-     series: [
-       { nom: "Taux (%)", valeurs: [86.5, 86.3, 87.1] },
-       // 2e série possible (sauf doughnut) ; un nom contenant
-       // "Objectif", "Seuil" ou "Cible" s'affiche en pointillés
-     ] },
-
-   Règles simples :
-   - L'ORDRE dans les listes = l'ordre d'affichage à l'écran.
-     Pour déplacer un contrôle : déplacer son bloc { ... }.
-   - Pour retirer un contrôle : supprimer son bloc, ou ajouter
-     "//" au début de chacune de ses lignes pour le désactiver.
-   - Les compteurs OK / alertes / KO des cartes d'accueil se
-     calculent automatiquement à partir des statuts.
-   - Attention aux virgules entre les blocs { ... }, { ... }.
-   **************************************************************** */
-
-const RAPPORT = {
-
-  meta: {
-    periode:   "Juin 2026",          // période analysée
-    genere_le: "2026-07-20",         // date de mise à jour
-  },
-
-  // Ordre d'affichage des 5 blocs sur la page d'accueil
-  ordre_sections: ["globale", "agents", "courtier", "annexe", "hors_ko"],
-
-  sections: {
-
-    /* ═══════════════════ 1. GLOBALE ═══════════════════ */
-    globale: {
-      libelle: "Globale",
-      description: "Portefeuille auto complet — tous réseaux confondus.",
-
-      // KPI affichés en bandeau (facultatif — laisser [] si aucun)
-      kpis: [
-        { label: "Contrats à renouveler", valeur: "48 217" },
-        { label: "Taux de renouvellement", valeur: "87,4 %" },
-      ],
-
-      // ---- Bloc 1 : Résultats — vos points de contrôle ----
-      checkpoints: [
-        { fonction: "verif_volumetrie",
-          libelle: "Volumétrie du portefeuille vs mois précédent",
-          statut: "ok", valeur: "48 217", seuil: "écart < 5 %",
-          commentaire: "Exemple : remplacez par les résultats de vos fonctions." },
-        { fonction: "verif_taux_renouvellement",
-          libelle: "Taux de renouvellement global",
-          statut: "alerte", valeur: "84,6 %", seuil: "≥ 85 %",
-          commentaire: "" },
-        // ➜ ajoutez vos autres contrôles ici
-      ],
-
-      // ---- Bloc 2 : Tables & visuels ----
-      tables: [
-        { titre: "Synthèse mensuelle des renouvellements",
-          source_fonction: "table_synthese_mensuelle",
-          colonnes: ["Mois", "À renouveler", "Renouvelés", "Taux (%)"],
-          lignes: [
-            ["Mai 2026", "47 370", "41 290", "87,2"],
-            ["Juin 2026", "48 217", "42 142", "87,4"],
-          ] },
-        // ➜ ajoutez vos autres tables ici
-      ],
-
-      visuels: [
-        { titre: "Évolution du taux de renouvellement",
-          source_fonction: "visuel_evolution_taux",
-          type: "line",
-          labels: ["Janv.", "Févr.", "Mars", "Avr.", "Mai", "Juin"],
-          series: [
-            { nom: "Taux (%)", valeurs: [86.5, 86.3, 87.1, 87.0, 87.2, 87.4] },
-            { nom: "Objectif (%)", valeurs: [85, 85, 85, 85, 85, 85] },
-          ] },
-        // ➜ ajoutez vos autres visuels ici
-      ],
-    },
-
-    /* ═══════════════════ 2. AGENTS ═══════════════════ */
-    agents: {
-      libelle: "Agents",
-      description: "Réseau des agents généraux mandataires.",
-      kpis: [],
-      checkpoints: [
-        { fonction: "ma_fonction_exemple",
-          libelle: "Exemple de contrôle — à remplacer par les vôtres",
-          statut: "ok", valeur: "—", seuil: "—", commentaire: "" },
-      ],
-      tables: [],
-      visuels: [],
-    },
-
-    /* ═══════════════════ 3. COURTIER ═══════════════════ */
-    courtier: {
-      libelle: "Courtier",
-      description: "Portefeuille apporté par le réseau de courtage.",
-      kpis: [],
-      checkpoints: [
-        { fonction: "ma_fonction_exemple",
-          libelle: "Exemple de contrôle — à remplacer par les vôtres",
-          statut: "ok", valeur: "—", seuil: "—", commentaire: "" },
-      ],
-      tables: [],
-      visuels: [],
-    },
-
-    /* ═══════════════════ 4. ANNEXE ═══════════════════ */
-    annexe: {
-      libelle: "Annexe",
-      description: "Canaux annexes : partenariats, affinitaire, direct.",
-      kpis: [],
-      checkpoints: [
-        { fonction: "ma_fonction_exemple",
-          libelle: "Exemple de contrôle — à remplacer par les vôtres",
-          statut: "ok", valeur: "—", seuil: "—", commentaire: "" },
-      ],
-      tables: [],
-      visuels: [],
-    },
-
-    /* ═══════════════════ 5. HORS KO ═══════════════════ */
-    hors_ko: {
-      libelle: "Hors KO",
-      description: "Périmètre hors rejets techniques (KO).",
-      kpis: [],
-      checkpoints: [
-        { fonction: "ma_fonction_exemple",
-          libelle: "Exemple de contrôle — à remplacer par les vôtres",
-          statut: "ok", valeur: "—", seuil: "—", commentaire: "" },
-      ],
-      tables: [],
-      visuels: [],
-    },
-
-  },
-};
-// ==FIN_DONNEES==
+const RAPPORT = __DONNEES_JSON__;
 
 /* ================================================================
    MOTEUR DE RENDU — ne pas modifier lors des mises à jour de données
@@ -473,16 +462,19 @@ function rendreTablesEtVisuels(section) {
     section.visuels.forEach((v, i) => {
       const p = document.createElement("div");
       p.className = "panneau";
-      const idCanvas = `graph-${i}`;
+      const corps = v.type === "image"
+        ? `<img src="${v.contenu}" alt="${esc(v.titre)}" style="width:100%;height:auto;border-radius:6px">`
+        : `<div class="conteneur-graph"><canvas id="graph-${i}"></canvas></div>`;
       p.innerHTML = `
         <h4>${esc(v.titre)}</h4>
         <div class="src">↳ ${esc(v.source_fonction)}()</div>
-        <div class="conteneur-graph"><canvas id="${idCanvas}"></canvas></div>`;
+        ${corps}`;
       grille.appendChild(p);
     });
     bloc.appendChild(grille);
 
     section.visuels.forEach((v, i) => {
+      if (v.type === "image") return;
       const ctx = document.getElementById(`graph-${i}`).getContext("2d");
       const estDonut = v.type === "doughnut";
       const donnees = estDonut
@@ -558,3 +550,76 @@ rendreAccueil();
 </script>
 </body>
 </html>
+"""
+
+# ============================================================================
+#  >>> VOTRE ZONE <<<  — enregistrez ici VOS fonctions déjà codées
+# ============================================================================
+#  Exemples de démonstration (à supprimer et remplacer par les vôtres).
+#  Une fonction = un output = un affichage. Aucune règle sur le contenu.
+
+def exemple_controle_volumetrie():
+    nb = 48_217
+    return checkpoint("Volumétrie du portefeuille", 
+                      statut="ok" if nb > 45_000 else "ko",
+                      valeur=f"{nb:,}".replace(",", " "),
+                      seuil="> 45 000")
+
+def exemple_table_pandas():
+    import pandas as pd
+    return pd.DataFrame({"Mois": ["Mai 2026", "Juin 2026"],
+                         "Renouvelés": [41_290, 42_142],
+                         "Taux (%)": [87.2, 87.4]})
+
+def exemple_graphique():
+    return visuel("Évolution du taux de renouvellement", "line",
+                  labels=["Janv.", "Févr.", "Mars", "Avr.", "Mai", "Juin"],
+                  series=[{"nom": "Taux (%)",
+                           "valeurs": [86.5, 86.3, 87.1, 87.0, 87.2, 87.4]},
+                          {"nom": "Objectif (%)", "valeurs": [85] * 6}])
+
+# ----------------------------------------------------------------------------
+# PIPELINE : vos 5 sections. Ajoutez / déplacez vos fonctions dans les listes.
+# ----------------------------------------------------------------------------
+PIPELINE = {
+    "globale": {
+        "libelle": "Globale",
+        "description": "Portefeuille auto complet — tous réseaux confondus.",
+        "kpis": {"Contrats à renouveler": "48 217",
+                 "Taux de renouvellement": "87,4 %"},
+        "fonctions": [
+            exemple_controle_volumetrie,   # <- remplacez par vos fonctions
+            exemple_table_pandas,
+            exemple_graphique,
+        ],
+    },
+    "agents": {
+        "libelle": "Agents",
+        "description": "Réseau des agents généraux mandataires.",
+        "kpis": {},
+        "fonctions": [],                   # <- vos fonctions ici
+    },
+    "courtier": {
+        "libelle": "Courtier",
+        "description": "Portefeuille apporté par le réseau de courtage.",
+        "kpis": {},
+        "fonctions": [],
+    },
+    "annexe": {
+        "libelle": "Annexe",
+        "description": "Canaux annexes : partenariats, affinitaire, direct.",
+        "kpis": {},
+        "fonctions": [],
+    },
+    "hors_ko": {
+        "libelle": "Hors KO",
+        "description": "Périmètre hors rejets techniques (KO).",
+        "kpis": {},
+        "fonctions": [],
+    },
+}
+
+# ----------------------------------------------------------------------------
+# AFFICHAGE dans la cellule Databricks
+# ----------------------------------------------------------------------------
+displayHTML(generer_rapport(PIPELINE, periode="Juin 2026"))  # noqa: F821
