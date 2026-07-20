@@ -1,0 +1,1302 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monitoring Renouvellements — Assurance Auto</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+  :root{
+    --bleu-nuit:#0A1D33;
+    --bleu-primaire:#17497E;
+    --bleu-moyen:#3E6FA3;
+    --bleu-clair:#9DBCDD;
+    --bleu-pale:#DDE9F5;
+    --fond:#F4F8FC;
+    --blanc:#FFFFFF;
+    --texte:#182B41;
+    --texte-2:#5B7188;
+    --ligne:#D8E3EF;
+    --ok:#1F7A5C;   --ok-bg:#E4F2EC;
+    --alerte:#A9761C; --alerte-bg:#FBF1DD;
+    --ko:#B03A2E;   --ko-bg:#F9E7E4;
+    --rayon:10px;
+    --ombre:0 1px 2px rgba(10,29,51,.06), 0 4px 14px rgba(10,29,51,.05);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{font-size:15px}
+  body{
+    font-family:"IBM Plex Sans",system-ui,sans-serif;
+    background:var(--fond);color:var(--texte);
+    -webkit-font-smoothing:antialiased;min-height:100vh;
+  }
+  .mono{font-family:"IBM Plex Mono",monospace}
+
+  /* ---------- En-tête ---------- */
+  header{
+    background:var(--bleu-nuit);color:#EAF1F9;
+    padding:26px 32px 24px;
+    border-bottom:3px solid var(--bleu-primaire);
+  }
+  .header-inner{max-width:1180px;margin:0 auto;display:flex;flex-wrap:wrap;gap:14px;justify-content:space-between;align-items:flex-end}
+  .surtitre{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--bleu-clair);margin-bottom:6px}
+  header h1{font-size:1.45rem;font-weight:600;letter-spacing:-.01em}
+  .meta-header{text-align:right;font-size:.8rem;color:var(--bleu-clair);line-height:1.7}
+  .meta-header .mono{color:#EAF1F9}
+
+  main{max-width:1180px;margin:0 auto;padding:30px 32px 60px}
+
+  /* ---------- Fil d'Ariane ---------- */
+  .fil{display:flex;align-items:center;gap:10px;margin-bottom:22px;font-size:.85rem;color:var(--texte-2)}
+  .fil button{
+    border:1px solid var(--ligne);background:var(--blanc);color:var(--bleu-primaire);
+    font:inherit;font-weight:600;padding:7px 14px;border-radius:8px;cursor:pointer;
+    display:inline-flex;align-items:center;gap:7px;transition:background .15s,border-color .15s;
+  }
+  .fil button:hover{background:var(--bleu-pale);border-color:var(--bleu-clair)}
+  .fil button:focus-visible, .carte:focus-visible, .onglet:focus-visible{outline:2px solid var(--bleu-primaire);outline-offset:2px}
+
+  /* ---------- Accueil : grille des 5 blocs ---------- */
+  .intro{margin-bottom:26px}
+  .intro h2{font-size:1.05rem;font-weight:600;margin-bottom:4px}
+  .intro p{color:var(--texte-2);font-size:.88rem;max-width:62ch}
+
+  .grille{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:18px}
+  .carte{
+    background:var(--blanc);border:1px solid var(--ligne);border-radius:var(--rayon);
+    box-shadow:var(--ombre);padding:20px 22px;cursor:pointer;text-align:left;
+    font:inherit;color:inherit;
+    display:flex;flex-direction:column;gap:14px;
+    transition:transform .15s,box-shadow .15s,border-color .15s;
+    border-top:3px solid var(--bleu-primaire);
+  }
+  .carte:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(10,29,51,.12);border-color:var(--bleu-clair)}
+  .carte-tete{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+  .carte h3{font-size:1.02rem;font-weight:600;color:var(--bleu-nuit)}
+  .carte .code-section{font-family:"IBM Plex Mono",monospace;font-size:.68rem;color:var(--texte-2);letter-spacing:.08em;text-transform:uppercase;margin-top:3px}
+  .carte p{font-size:.83rem;color:var(--texte-2);line-height:1.5;flex:1}
+  .carte-pied{display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--ligne);padding-top:12px}
+  .compteurs{display:flex;gap:6px}
+  .pastille{font-family:"IBM Plex Mono",monospace;font-size:.72rem;font-weight:600;padding:3px 9px;border-radius:99px}
+  .pastille.ok{background:var(--ok-bg);color:var(--ok)}
+  .pastille.alerte{background:var(--alerte-bg);color:var(--alerte)}
+  .pastille.ko{background:var(--ko-bg);color:var(--ko)}
+  .fleche{color:var(--bleu-moyen);font-size:1.1rem}
+
+  /* ---------- Vue section ---------- */
+  .tete-section{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:18px}
+  .tete-section h2{font-size:1.35rem;font-weight:600;color:var(--bleu-nuit)}
+  .tete-section .sous{color:var(--texte-2);font-size:.87rem;margin-top:3px}
+
+  .bandeau-kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:24px}
+  .kpi{background:var(--blanc);border:1px solid var(--ligne);border-radius:var(--rayon);padding:14px 16px}
+  .kpi .k-label{font-size:.72rem;letter-spacing:.06em;text-transform:uppercase;color:var(--texte-2);margin-bottom:6px}
+  .kpi .k-val{font-family:"IBM Plex Mono",monospace;font-size:1.25rem;font-weight:600;color:var(--bleu-primaire)}
+
+  /* Onglets : Résultats / Tables & visuels */
+  .onglets{display:flex;gap:6px;border-bottom:2px solid var(--ligne);margin-bottom:22px}
+  .onglet{
+    font:inherit;font-weight:600;font-size:.9rem;color:var(--texte-2);
+    background:none;border:none;padding:10px 16px;cursor:pointer;
+    border-bottom:3px solid transparent;margin-bottom:-2px;transition:color .15s,border-color .15s;
+  }
+  .onglet:hover{color:var(--bleu-primaire)}
+  .onglet.actif{color:var(--bleu-primaire);border-bottom-color:var(--bleu-primaire)}
+
+  /* Bloc Résultats : points de contrôle */
+  .resume-controles{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+  .controle{
+    background:var(--blanc);border:1px solid var(--ligne);border-radius:var(--rayon);
+    padding:14px 18px;margin-bottom:10px;
+    display:grid;grid-template-columns:34px 1fr auto auto;gap:14px;align-items:center;
+  }
+  .controle .num{font-family:"IBM Plex Mono",monospace;font-size:.78rem;color:var(--texte-2)}
+  .controle .lib{font-weight:500;font-size:.92rem}
+  .controle .fonction{font-family:"IBM Plex Mono",monospace;font-size:.72rem;color:var(--texte-2);margin-top:3px}
+  .controle .comment{font-size:.8rem;color:var(--texte-2);margin-top:5px;line-height:1.45}
+  .controle .valeurs{font-family:"IBM Plex Mono",monospace;font-size:.82rem;text-align:right;color:var(--texte);line-height:1.7;white-space:nowrap}
+  .controle .valeurs .seuil{color:var(--texte-2);font-size:.74rem}
+  .statut{font-family:"IBM Plex Mono",monospace;font-size:.72rem;font-weight:600;letter-spacing:.05em;padding:5px 12px;border-radius:99px;justify-self:end}
+  .statut.ok{background:var(--ok-bg);color:var(--ok)}
+  .statut.alerte{background:var(--alerte-bg);color:var(--alerte)}
+  .statut.ko{background:var(--ko-bg);color:var(--ko)}
+  .controle.est-ko{border-left:3px solid var(--ko)}
+  .controle.est-alerte{border-left:3px solid var(--alerte)}
+  .controle.est-ok{border-left:3px solid var(--ok)}
+
+  /* Bloc Tables & visuels */
+  .panneau{background:var(--blanc);border:1px solid var(--ligne);border-radius:var(--rayon);box-shadow:var(--ombre);padding:20px 22px;margin-bottom:20px}
+  .panneau h4{font-size:.98rem;font-weight:600;color:var(--bleu-nuit)}
+  .panneau .src{font-family:"IBM Plex Mono",monospace;font-size:.7rem;color:var(--texte-2);margin:3px 0 14px}
+  .table-scroll{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:.85rem}
+  thead th{
+    text-align:left;font-size:.72rem;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--blanc);background:var(--bleu-primaire);padding:9px 12px;white-space:nowrap;
+  }
+  thead th:first-child{border-radius:6px 0 0 6px}
+  thead th:last-child{border-radius:0 6px 6px 0}
+  tbody td{padding:9px 12px;border-bottom:1px solid var(--ligne)}
+  tbody tr:nth-child(even){background:#F8FBFE}
+  tbody tr:hover{background:var(--bleu-pale)}
+  td.num{font-family:"IBM Plex Mono",monospace;text-align:right;white-space:nowrap}
+  .grille-visuels{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px}
+  .conteneur-graph{position:relative;height:300px}
+
+  footer{max-width:1180px;margin:0 auto;padding:0 32px 34px;font-size:.75rem;color:var(--texte-2);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+
+  @media (max-width:640px){
+    header,main,footer{padding-left:18px;padding-right:18px}
+    .controle{grid-template-columns:26px 1fr;grid-template-rows:auto auto}
+    .controle .valeurs{text-align:left;grid-column:2}
+    .statut{justify-self:start;grid-column:2}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *{transition:none!important;animation:none!important}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div>
+      <div class="surtitre">Direction technique · Actuariat produit</div>
+      <h1 id="titre-rapport">Monitoring des renouvellements — Assurance Auto</h1>
+    </div>
+    <div class="meta-header">
+      Période : <span class="mono" id="meta-periode">—</span><br>
+      Généré le : <span class="mono" id="meta-genere">—</span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <nav class="fil" id="fil" hidden>
+    <button id="btn-retour" type="button">← Vue d'ensemble</button>
+    <span id="fil-libelle"></span>
+  </nav>
+
+  <!-- ========== VUE ACCUEIL ========== -->
+  <section id="vue-accueil">
+    <div class="intro">
+      <h2>Vue d'ensemble du contrôle</h2>
+      <p>Sélectionnez un périmètre pour consulter les points de contrôle issus de la chaîne de calcul, puis les tables et visuels associés.</p>
+    </div>
+    <div class="grille" id="grille-sections"></div>
+  </section>
+
+  <!-- ========== VUE SECTION ========== -->
+  <section id="vue-section" hidden>
+    <div class="tete-section">
+      <div>
+        <h2 id="section-titre"></h2>
+        <div class="sous" id="section-desc"></div>
+      </div>
+      <div class="compteurs" id="section-compteurs"></div>
+    </div>
+
+    <div class="bandeau-kpi" id="section-kpis"></div>
+
+    <div class="onglets" role="tablist">
+      <button class="onglet actif" id="ong-resultats" role="tab" type="button">1 · Résultats — points de contrôle</button>
+      <button class="onglet" id="ong-visuels" role="tab" type="button">2 · Tables &amp; visuels</button>
+    </div>
+
+    <div id="bloc-resultats"></div>
+    <div id="bloc-visuels" hidden></div>
+  </section>
+</main>
+
+<footer>
+  <span>Rapport généré automatiquement à partir des fonctions Python de contrôle.</span>
+  <span class="mono">v1.0 · usage interne</span>
+</footer>
+
+<script>
+/* ================================================================
+   DONNÉES DU RAPPORT
+   ----------------------------------------------------------------
+   Ce bloc est la SEULE partie à modifier lors d'une mise à jour.
+   Il peut être régénéré automatiquement par le script Python
+   fourni (generer_rapport.py) : chaque fonction de calcul produit
+   un "checkpoint", une "table" ou un "visuel", et l'ordre des
+   éléments dans les listes définit l'ordre d'affichage.
+   Pour ajouter / déplacer une fonction : ajouter / déplacer son
+   objet dans la liste correspondante. Rien d'autre à toucher.
+   ================================================================ */
+// ==DEBUT_DONNEES==
+const RAPPORT = {
+  "meta": {
+    "periode": "Juin 2026",
+    "genere_le": "2026-07-20 08:45"
+  },
+  "ordre_sections": [
+    "globale",
+    "agents",
+    "courtier",
+    "annexe",
+    "hors_ko"
+  ],
+  "sections": {
+    "globale": {
+      "libelle": "Globale",
+      "description": "Portefeuille auto complet — tous réseaux de distribution confondus.",
+      "kpis": [
+        {
+          "label": "Contrats à renouveler",
+          "valeur": "48 217"
+        },
+        {
+          "label": "Taux de renouvellement",
+          "valeur": "87,4 %"
+        },
+        {
+          "label": "Prime moyenne",
+          "valeur": "512 €"
+        },
+        {
+          "label": "Évolution prime",
+          "valeur": "+3,1 %"
+        }
+      ],
+      "checkpoints": [
+        {
+          "fonction": "verif_volumetrie",
+          "libelle": "Volumétrie du portefeuille vs mois précédent",
+          "statut": "ok",
+          "valeur": "48 217",
+          "seuil": "écart < 5 %",
+          "commentaire": "Écart de +1,8 % par rapport à mai 2026, dans la tolérance."
+        },
+        {
+          "fonction": "verif_taux_renouvellement",
+          "libelle": "Taux de renouvellement global",
+          "statut": "ok",
+          "valeur": "87,4 %",
+          "seuil": "≥ 85 %",
+          "commentaire": ""
+        },
+        {
+          "fonction": "verif_prime_moyenne",
+          "libelle": "Cohérence de la prime moyenne renouvelée",
+          "statut": "alerte",
+          "valeur": "+3,1 %",
+          "seuil": "entre 0 % et +2,5 %",
+          "commentaire": "Hausse tirée par le segment jeunes conducteurs ; à confirmer avec la tarification."
+        },
+        {
+          "fonction": "verif_doublons_police",
+          "libelle": "Absence de doublons de numéro de police",
+          "statut": "ok",
+          "valeur": "0 doublon",
+          "seuil": "= 0",
+          "commentaire": ""
+        },
+        {
+          "fonction": "verif_contrats_sans_decision",
+          "libelle": "Contrats sans décision de renouvellement",
+          "statut": "ko",
+          "valeur": "312",
+          "seuil": "< 100",
+          "commentaire": "Concentration sur le lot du 15/06 — à réinjecter dans la chaîne de décision."
+        },
+        {
+          "fonction": "verif_ecart_tarifaire",
+          "libelle": "Écarts tarifaires extrêmes (> ±25 %)",
+          "statut": "alerte",
+          "valeur": "1,9 %",
+          "seuil": "< 1,5 %",
+          "commentaire": "142 contrats au-delà du plafond de majoration ; revue tarifaire recommandée."
+        }
+      ],
+      "tables": [
+        {
+          "titre": "Synthèse mensuelle des renouvellements",
+          "source_fonction": "table_synthese_mensuelle",
+          "colonnes": [
+            "Mois",
+            "À renouveler",
+            "Renouvelés",
+            "Résiliés",
+            "Taux (%)",
+            "Prime moy. (€)"
+          ],
+          "lignes": [
+            [
+              "Janv. 2026",
+              "46 102",
+              "39 870",
+              "6 232",
+              "86,5",
+              "497"
+            ],
+            [
+              "Févr. 2026",
+              "45 880",
+              "39 615",
+              "6 265",
+              "86,3",
+              "499"
+            ],
+            [
+              "Mars 2026",
+              "47 013",
+              "40 950",
+              "6 063",
+              "87,1",
+              "503"
+            ],
+            [
+              "Avr. 2026",
+              "46 540",
+              "40 490",
+              "6 050",
+              "87,0",
+              "506"
+            ],
+            [
+              "Mai 2026",
+              "47 370",
+              "41 290",
+              "6 080",
+              "87,2",
+              "508"
+            ],
+            [
+              "Juin 2026",
+              "48 217",
+              "42 142",
+              "6 075",
+              "87,4",
+              "512"
+            ]
+          ]
+        },
+        {
+          "titre": "Répartition par réseau de distribution",
+          "source_fonction": "table_repartition_reseau",
+          "colonnes": [
+            "Réseau",
+            "Contrats",
+            "Part (%)",
+            "Taux renouv. (%)",
+            "Prime moy. (€)"
+          ],
+          "lignes": [
+            [
+              "Agents",
+              "21 480",
+              "44,5",
+              "89,1",
+              "524"
+            ],
+            [
+              "Courtiers",
+              "15 210",
+              "31,5",
+              "85,2",
+              "531"
+            ],
+            [
+              "Annexe",
+              "8 940",
+              "18,5",
+              "88,0",
+              "462"
+            ],
+            [
+              "Hors KO",
+              "2 587",
+              "5,5",
+              "82,6",
+              "488"
+            ]
+          ]
+        }
+      ],
+      "visuels": [
+        {
+          "titre": "Évolution du taux de renouvellement (12 mois)",
+          "source_fonction": "visuel_evolution_taux",
+          "type": "line",
+          "labels": [
+            "Juil.",
+            "Août",
+            "Sept.",
+            "Oct.",
+            "Nov.",
+            "Déc.",
+            "Janv.",
+            "Févr.",
+            "Mars",
+            "Avr.",
+            "Mai",
+            "Juin"
+          ],
+          "series": [
+            {
+              "nom": "Taux renouvellement (%)",
+              "valeurs": [
+                85.9,
+                86.1,
+                86.4,
+                86.2,
+                86.8,
+                86.6,
+                86.5,
+                86.3,
+                87.1,
+                87.0,
+                87.2,
+                87.4
+              ]
+            },
+            {
+              "nom": "Objectif (%)",
+              "valeurs": [
+                85,
+                85,
+                85,
+                85,
+                85,
+                85,
+                85,
+                85,
+                85,
+                85,
+                85,
+                85
+              ]
+            }
+          ]
+        },
+        {
+          "titre": "Contrats renouvelés par réseau",
+          "source_fonction": "visuel_volumes_reseau",
+          "type": "bar",
+          "labels": [
+            "Agents",
+            "Courtiers",
+            "Annexe",
+            "Hors KO"
+          ],
+          "series": [
+            {
+              "nom": "Renouvelés",
+              "valeurs": [
+                19139,
+                12959,
+                7867,
+                2137
+              ]
+            },
+            {
+              "nom": "Résiliés",
+              "valeurs": [
+                2341,
+                2251,
+                1073,
+                450
+              ]
+            }
+          ]
+        },
+        {
+          "titre": "Répartition du portefeuille",
+          "source_fonction": "visuel_repartition_portefeuille",
+          "type": "doughnut",
+          "labels": [
+            "Agents",
+            "Courtiers",
+            "Annexe",
+            "Hors KO"
+          ],
+          "series": [
+            {
+              "nom": "Part",
+              "valeurs": [
+                44.5,
+                31.5,
+                18.5,
+                5.5
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "agents": {
+      "libelle": "Agents",
+      "description": "Réseau des agents généraux mandataires.",
+      "kpis": [
+        {
+          "label": "Contrats à renouveler",
+          "valeur": "21 480"
+        },
+        {
+          "label": "Taux de renouvellement",
+          "valeur": "89,1 %"
+        },
+        {
+          "label": "Prime moyenne",
+          "valeur": "524 €"
+        }
+      ],
+      "checkpoints": [
+        {
+          "fonction": "verif_volumetrie_agents",
+          "libelle": "Volumétrie du réseau agents",
+          "statut": "ok",
+          "valeur": "21 480",
+          "seuil": "écart < 5 %",
+          "commentaire": ""
+        },
+        {
+          "fonction": "verif_taux_agents",
+          "libelle": "Taux de renouvellement du réseau",
+          "statut": "ok",
+          "valeur": "89,1 %",
+          "seuil": "≥ 86 %",
+          "commentaire": ""
+        },
+        {
+          "fonction": "verif_dispersion_agences",
+          "libelle": "Dispersion des taux entre agences",
+          "statut": "alerte",
+          "valeur": "σ = 4,8 pts",
+          "seuil": "σ < 4 pts",
+          "commentaire": "3 agences sous 78 % de renouvellement : suivi commercial engagé."
+        },
+        {
+          "fonction": "verif_commissions",
+          "libelle": "Cohérence des taux de commission appliqués",
+          "statut": "ok",
+          "valeur": "0 anomalie",
+          "seuil": "= 0",
+          "commentaire": ""
+        }
+      ],
+      "tables": [
+        {
+          "titre": "Top / Flop agences par taux de renouvellement",
+          "source_fonction": "table_top_flop_agences",
+          "colonnes": [
+            "Agence",
+            "Région",
+            "Contrats",
+            "Taux (%)",
+            "Écart vs réseau (pts)"
+          ],
+          "lignes": [
+            [
+              "AG-0147",
+              "Nord",
+              "612",
+              "94,2",
+              "+5,1"
+            ],
+            [
+              "AG-0093",
+              "Ouest",
+              "540",
+              "93,6",
+              "+4,5"
+            ],
+            [
+              "AG-0211",
+              "Sud-Est",
+              "498",
+              "92,8",
+              "+3,7"
+            ],
+            [
+              "AG-0305",
+              "Centre",
+              "371",
+              "77,9",
+              "-11,2"
+            ],
+            [
+              "AG-0188",
+              "Sud-Ouest",
+              "402",
+              "77,1",
+              "-12,0"
+            ],
+            [
+              "AG-0276",
+              "Est",
+              "356",
+              "76,4",
+              "-12,7"
+            ]
+          ]
+        }
+      ],
+      "visuels": [
+        {
+          "titre": "Taux de renouvellement par région",
+          "source_fonction": "visuel_taux_regions_agents",
+          "type": "bar",
+          "labels": [
+            "Nord",
+            "Ouest",
+            "Est",
+            "Centre",
+            "Sud-Est",
+            "Sud-Ouest"
+          ],
+          "series": [
+            {
+              "nom": "Taux (%)",
+              "valeurs": [
+                90.4,
+                89.8,
+                88.2,
+                88.9,
+                89.5,
+                87.6
+              ]
+            }
+          ]
+        },
+        {
+          "titre": "Évolution mensuelle du taux — réseau agents",
+          "source_fonction": "visuel_evolution_agents",
+          "type": "line",
+          "labels": [
+            "Janv.",
+            "Févr.",
+            "Mars",
+            "Avr.",
+            "Mai",
+            "Juin"
+          ],
+          "series": [
+            {
+              "nom": "Taux (%)",
+              "valeurs": [
+                88.2,
+                88.0,
+                88.7,
+                88.9,
+                89.0,
+                89.1
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "courtier": {
+      "libelle": "Courtier",
+      "description": "Portefeuille apporté par le réseau de courtage.",
+      "kpis": [
+        {
+          "label": "Contrats à renouveler",
+          "valeur": "15 210"
+        },
+        {
+          "label": "Taux de renouvellement",
+          "valeur": "85,2 %"
+        },
+        {
+          "label": "Prime moyenne",
+          "valeur": "531 €"
+        }
+      ],
+      "checkpoints": [
+        {
+          "fonction": "verif_volumetrie_courtiers",
+          "libelle": "Volumétrie du réseau courtage",
+          "statut": "ok",
+          "valeur": "15 210",
+          "seuil": "écart < 5 %",
+          "commentaire": ""
+        },
+        {
+          "fonction": "verif_taux_courtiers",
+          "libelle": "Taux de renouvellement du réseau",
+          "statut": "alerte",
+          "valeur": "85,2 %",
+          "seuil": "≥ 86 %",
+          "commentaire": "Léger retrait, concentré sur 2 courtiers grossistes."
+        },
+        {
+          "fonction": "verif_concentration",
+          "libelle": "Concentration du portefeuille (top 5 courtiers)",
+          "statut": "alerte",
+          "valeur": "41 %",
+          "seuil": "< 40 %",
+          "commentaire": "Dépendance en hausse ; à suivre au comité distribution."
+        },
+        {
+          "fonction": "verif_delais_emission",
+          "libelle": "Délai moyen d'émission des avenants",
+          "statut": "ok",
+          "valeur": "3,2 j",
+          "seuil": "< 5 j",
+          "commentaire": ""
+        }
+      ],
+      "tables": [
+        {
+          "titre": "Principaux courtiers — activité de renouvellement",
+          "source_fonction": "table_top_courtiers",
+          "colonnes": [
+            "Courtier",
+            "Contrats",
+            "Taux (%)",
+            "Prime moy. (€)",
+            "Évol. prime (%)"
+          ],
+          "lignes": [
+            [
+              "CRT-Alpha",
+              "2 140",
+              "86,8",
+              "545",
+              "+2,4"
+            ],
+            [
+              "CRT-Meridien",
+              "1 870",
+              "83,1",
+              "528",
+              "+3,8"
+            ],
+            [
+              "CRT-Atlantique",
+              "1 260",
+              "84,0",
+              "519",
+              "+3,2"
+            ],
+            [
+              "CRT-Provence",
+              "980",
+              "87,5",
+              "552",
+              "+1,9"
+            ],
+            [
+              "CRT-Nordis",
+              "860",
+              "82,3",
+              "507",
+              "+4,1"
+            ]
+          ]
+        }
+      ],
+      "visuels": [
+        {
+          "titre": "Taux de renouvellement — top courtiers",
+          "source_fonction": "visuel_taux_courtiers",
+          "type": "bar",
+          "labels": [
+            "Alpha",
+            "Meridien",
+            "Atlantique",
+            "Provence",
+            "Nordis"
+          ],
+          "series": [
+            {
+              "nom": "Taux (%)",
+              "valeurs": [
+                86.8,
+                83.1,
+                84.0,
+                87.5,
+                82.3
+              ]
+            }
+          ]
+        },
+        {
+          "titre": "Évolution mensuelle du taux — courtage",
+          "source_fonction": "visuel_evolution_courtiers",
+          "type": "line",
+          "labels": [
+            "Janv.",
+            "Févr.",
+            "Mars",
+            "Avr.",
+            "Mai",
+            "Juin"
+          ],
+          "series": [
+            {
+              "nom": "Taux (%)",
+              "valeurs": [
+                85.9,
+                85.6,
+                85.8,
+                85.5,
+                85.4,
+                85.2
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "annexe": {
+      "libelle": "Annexe",
+      "description": "Canaux annexes : partenariats, affinitaire et vente directe.",
+      "kpis": [
+        {
+          "label": "Contrats à renouveler",
+          "valeur": "8 940"
+        },
+        {
+          "label": "Taux de renouvellement",
+          "valeur": "88,0 %"
+        },
+        {
+          "label": "Prime moyenne",
+          "valeur": "462 €"
+        }
+      ],
+      "checkpoints": [
+        {
+          "fonction": "verif_volumetrie_annexe",
+          "libelle": "Volumétrie des canaux annexes",
+          "statut": "ok",
+          "valeur": "8 940",
+          "seuil": "écart < 5 %",
+          "commentaire": ""
+        },
+        {
+          "fonction": "verif_taux_annexe",
+          "libelle": "Taux de renouvellement des canaux annexes",
+          "statut": "ok",
+          "valeur": "88,0 %",
+          "seuil": "≥ 85 %",
+          "commentaire": ""
+        },
+        {
+          "fonction": "verif_partenariats",
+          "libelle": "Complétude des flux partenaires",
+          "statut": "ok",
+          "valeur": "12/12 flux reçus",
+          "seuil": "= 12",
+          "commentaire": ""
+        }
+      ],
+      "tables": [
+        {
+          "titre": "Détail par canal annexe",
+          "source_fonction": "table_detail_annexe",
+          "colonnes": [
+            "Canal",
+            "Contrats",
+            "Taux (%)",
+            "Prime moy. (€)"
+          ],
+          "lignes": [
+            [
+              "Partenariat bancaire",
+              "4 320",
+              "89,3",
+              "471"
+            ],
+            [
+              "Affinitaire auto",
+              "2 610",
+              "87,1",
+              "448"
+            ],
+            [
+              "Vente directe web",
+              "2 010",
+              "86,5",
+              "459"
+            ]
+          ]
+        }
+      ],
+      "visuels": [
+        {
+          "titre": "Répartition des contrats par canal",
+          "source_fonction": "visuel_repartition_annexe",
+          "type": "doughnut",
+          "labels": [
+            "Partenariat bancaire",
+            "Affinitaire",
+            "Direct web"
+          ],
+          "series": [
+            {
+              "nom": "Contrats",
+              "valeurs": [
+                4320,
+                2610,
+                2010
+              ]
+            }
+          ]
+        },
+        {
+          "titre": "Évolution mensuelle du taux — annexe",
+          "source_fonction": "visuel_evolution_annexe",
+          "type": "line",
+          "labels": [
+            "Janv.",
+            "Févr.",
+            "Mars",
+            "Avr.",
+            "Mai",
+            "Juin"
+          ],
+          "series": [
+            {
+              "nom": "Taux (%)",
+              "valeurs": [
+                87.1,
+                87.3,
+                87.6,
+                87.8,
+                87.9,
+                88.0
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "hors_ko": {
+      "libelle": "Hors KO",
+      "description": "Contrats exclus des rejets techniques (KO) — périmètre de contrôle qualité.",
+      "kpis": [
+        {
+          "label": "Contrats concernés",
+          "valeur": "2 587"
+        },
+        {
+          "label": "Taux de renouvellement",
+          "valeur": "82,6 %"
+        },
+        {
+          "label": "Taux de rejet résiduel",
+          "valeur": "0,7 %"
+        }
+      ],
+      "checkpoints": [
+        {
+          "fonction": "verif_volumetrie_hors_ko",
+          "libelle": "Volumétrie du périmètre hors KO",
+          "statut": "ok",
+          "valeur": "2 587",
+          "seuil": "écart < 10 %",
+          "commentaire": ""
+        },
+        {
+          "fonction": "verif_rejets_residuels",
+          "libelle": "Rejets résiduels après retraitement",
+          "statut": "ok",
+          "valeur": "0,7 %",
+          "seuil": "< 1 %",
+          "commentaire": ""
+        },
+        {
+          "fonction": "verif_reprises",
+          "libelle": "Contrats repris dans la chaîne après correction",
+          "statut": "alerte",
+          "valeur": "91 %",
+          "seuil": "≥ 95 %",
+          "commentaire": "234 contrats en attente de reprise ; correction planifiée au batch du 22/07."
+        },
+        {
+          "fonction": "verif_anciennete_ko",
+          "libelle": "Ancienneté maximale des KO non traités",
+          "statut": "ko",
+          "valeur": "38 j",
+          "seuil": "< 30 j",
+          "commentaire": "8 dossiers au-delà du délai cible — escalade au support applicatif."
+        }
+      ],
+      "tables": [
+        {
+          "titre": "Motifs de rejet et retraitement",
+          "source_fonction": "table_motifs_ko",
+          "colonnes": [
+            "Motif",
+            "Occurrences",
+            "Repris",
+            "En attente",
+            "Ancienneté max (j)"
+          ],
+          "lignes": [
+            [
+              "Référence tarifaire absente",
+              "914",
+              "880",
+              "34",
+              "21"
+            ],
+            [
+              "Incohérence bonus-malus",
+              "687",
+              "640",
+              "47",
+              "38"
+            ],
+            [
+              "Adresse invalide",
+              "512",
+              "471",
+              "41",
+              "17"
+            ],
+            [
+              "Pièce manquante",
+              "474",
+              "362",
+              "112",
+              "26"
+            ]
+          ]
+        }
+      ],
+      "visuels": [
+        {
+          "titre": "Occurrences par motif de rejet",
+          "source_fonction": "visuel_motifs_ko",
+          "type": "bar",
+          "labels": [
+            "Réf. tarifaire",
+            "Bonus-malus",
+            "Adresse",
+            "Pièce manquante"
+          ],
+          "series": [
+            {
+              "nom": "Repris",
+              "valeurs": [
+                880,
+                640,
+                471,
+                362
+              ]
+            },
+            {
+              "nom": "En attente",
+              "valeurs": [
+                34,
+                47,
+                41,
+                112
+              ]
+            }
+          ]
+        },
+        {
+          "titre": "Évolution du stock de KO non traités",
+          "source_fonction": "visuel_stock_ko",
+          "type": "line",
+          "labels": [
+            "Janv.",
+            "Févr.",
+            "Mars",
+            "Avr.",
+            "Mai",
+            "Juin"
+          ],
+          "series": [
+            {
+              "nom": "Stock en attente",
+              "valeurs": [
+                310,
+                289,
+                265,
+                258,
+                241,
+                234
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+};
+// ==FIN_DONNEES==
+
+/* ================================================================
+   MOTEUR DE RENDU — ne pas modifier lors des mises à jour de données
+   ================================================================ */
+const PALETTE_GRAPH = ["#17497E", "#3E6FA3", "#9DBCDD", "#0A1D33", "#6E93BC"];
+const LIBELLE_STATUT = { ok: "OK", alerte: "ALERTE", ko: "KO" };
+let graphiquesActifs = [];
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+
+function compter(section) {
+  const c = { ok: 0, alerte: 0, ko: 0 };
+  section.checkpoints.forEach(p => c[p.statut] = (c[p.statut] || 0) + 1);
+  return c;
+}
+
+function rendreAccueil() {
+  const grille = $("grille-sections");
+  grille.innerHTML = "";
+  RAPPORT.ordre_sections.forEach(cle => {
+    const s = RAPPORT.sections[cle];
+    if (!s) return;
+    const c = compter(s);
+    const btn = document.createElement("button");
+    btn.className = "carte";
+    btn.type = "button";
+    btn.innerHTML = `
+      <div class="carte-tete">
+        <div>
+          <h3>${esc(s.libelle)}</h3>
+          <div class="code-section">${esc(cle)}</div>
+        </div>
+      </div>
+      <p>${esc(s.description)}</p>
+      <div class="carte-pied">
+        <div class="compteurs">
+          <span class="pastille ok">${c.ok} OK</span>
+          ${c.alerte ? `<span class="pastille alerte">${c.alerte} alerte${c.alerte>1?"s":""}</span>` : ""}
+          ${c.ko ? `<span class="pastille ko">${c.ko} KO</span>` : ""}
+        </div>
+        <span class="fleche">→</span>
+      </div>`;
+    btn.addEventListener("click", () => ouvrirSection(cle));
+    grille.appendChild(btn);
+  });
+}
+
+function rendreCheckpoints(section) {
+  const bloc = $("bloc-resultats");
+  bloc.innerHTML = section.checkpoints.map((p, i) => `
+    <div class="controle est-${p.statut}">
+      <div class="num">${String(i + 1).padStart(2, "0")}</div>
+      <div>
+        <div class="lib">${esc(p.libelle)}</div>
+        <div class="fonction">↳ ${esc(p.fonction)}()</div>
+        ${p.commentaire ? `<div class="comment">${esc(p.commentaire)}</div>` : ""}
+      </div>
+      <div class="valeurs">${esc(p.valeur)}<br><span class="seuil">seuil : ${esc(p.seuil)}</span></div>
+      <span class="statut ${p.statut}">${LIBELLE_STATUT[p.statut] || p.statut}</span>
+    </div>`).join("");
+}
+
+function rendreTablesEtVisuels(section) {
+  graphiquesActifs.forEach(g => g.destroy());
+  graphiquesActifs = [];
+  const bloc = $("bloc-visuels");
+  bloc.innerHTML = "";
+
+  (section.tables || []).forEach(t => {
+    const p = document.createElement("div");
+    p.className = "panneau";
+    p.innerHTML = `
+      <h4>${esc(t.titre)}</h4>
+      <div class="src">↳ ${esc(t.source_fonction)}()</div>
+      <div class="table-scroll"><table>
+        <thead><tr>${t.colonnes.map(c => `<th>${esc(c)}</th>`).join("")}</tr></thead>
+        <tbody>${t.lignes.map(l => `<tr>${l.map((v, j) =>
+          `<td class="${j > 0 && /^[\d\s.,+\-–—%€]+$/.test(String(v)) ? "num" : ""}">${esc(v)}</td>`).join("")}</tr>`).join("")}
+        </tbody></table></div>`;
+    bloc.appendChild(p);
+  });
+
+  if ((section.visuels || []).length) {
+    const grille = document.createElement("div");
+    grille.className = "grille-visuels";
+    section.visuels.forEach((v, i) => {
+      const p = document.createElement("div");
+      p.className = "panneau";
+      const idCanvas = `graph-${i}`;
+      p.innerHTML = `
+        <h4>${esc(v.titre)}</h4>
+        <div class="src">↳ ${esc(v.source_fonction)}()</div>
+        <div class="conteneur-graph"><canvas id="${idCanvas}"></canvas></div>`;
+      grille.appendChild(p);
+    });
+    bloc.appendChild(grille);
+
+    section.visuels.forEach((v, i) => {
+      const ctx = document.getElementById(`graph-${i}`).getContext("2d");
+      const estDonut = v.type === "doughnut";
+      const donnees = estDonut
+        ? { labels: v.labels, datasets: [{ data: v.series[0].valeurs, backgroundColor: PALETTE_GRAPH, borderColor: "#fff", borderWidth: 2 }] }
+        : { labels: v.labels, datasets: v.series.map((s, k) => ({
+            label: s.nom, data: s.valeurs,
+            backgroundColor: v.type === "bar" ? PALETTE_GRAPH[k % PALETTE_GRAPH.length] : "transparent",
+            borderColor: PALETTE_GRAPH[k % PALETTE_GRAPH.length],
+            borderWidth: 2, tension: .3, pointRadius: 3,
+            borderDash: /objectif|seuil|cible/i.test(s.nom) ? [6, 4] : [],
+          })) };
+      graphiquesActifs.push(new Chart(ctx, {
+        type: v.type, data: donnees,
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { position: "bottom", labels: { font: { family: "IBM Plex Sans", size: 11 }, boxWidth: 12 } } },
+          scales: estDonut ? {} : {
+            x: { grid: { display: false }, ticks: { font: { family: "IBM Plex Sans", size: 11 } } },
+            y: { grid: { color: "#E4EDF6" }, ticks: { font: { family: "IBM Plex Mono", size: 11 } } },
+          },
+        },
+      }));
+    });
+  }
+}
+
+function ouvrirSection(cle) {
+  const s = RAPPORT.sections[cle];
+  if (!s) return;
+  $("vue-accueil").hidden = true;
+  $("vue-section").hidden = false;
+  $("fil").hidden = false;
+  $("fil-libelle").textContent = `Périmètre : ${s.libelle}`;
+  $("section-titre").textContent = s.libelle;
+  $("section-desc").textContent = s.description;
+
+  const c = compter(s);
+  $("section-compteurs").innerHTML = `
+    <span class="pastille ok">${c.ok} OK</span>
+    ${c.alerte ? `<span class="pastille alerte">${c.alerte} alerte${c.alerte>1?"s":""}</span>` : ""}
+    ${c.ko ? `<span class="pastille ko">${c.ko} KO</span>` : ""}`;
+
+  $("section-kpis").innerHTML = (s.kpis || []).map(k => `
+    <div class="kpi"><div class="k-label">${esc(k.label)}</div><div class="k-val">${esc(k.valeur)}</div></div>`).join("");
+
+  rendreCheckpoints(s);
+  rendreTablesEtVisuels(s);
+  basculerOnglet("resultats");
+  window.scrollTo({ top: 0 });
+}
+
+function fermerSection() {
+  $("vue-section").hidden = true;
+  $("fil").hidden = true;
+  $("vue-accueil").hidden = false;
+}
+
+function basculerOnglet(nom) {
+  const resultats = nom === "resultats";
+  $("ong-resultats").classList.toggle("actif", resultats);
+  $("ong-visuels").classList.toggle("actif", !resultats);
+  $("bloc-resultats").hidden = !resultats;
+  $("bloc-visuels").hidden = resultats;
+}
+
+$("btn-retour").addEventListener("click", fermerSection);
+$("ong-resultats").addEventListener("click", () => basculerOnglet("resultats"));
+$("ong-visuels").addEventListener("click", () => basculerOnglet("visuels"));
+
+$("meta-periode").textContent = RAPPORT.meta.periode;
+$("meta-genere").textContent = RAPPORT.meta.genere_le;
+rendreAccueil();
+</script>
+</body>
+</html>
