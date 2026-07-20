@@ -1,160 +1,192 @@
 # Databricks notebook source
 # ============================================================================
-#  RAPPORT DE MONITORING — RENOUVELLEMENTS ASSURANCE AUTO (version Databricks)
+#  RAPPORT DE MONITORING — RENOUVELLEMENTS AUTO  (template vierge)
 # ============================================================================
-#  Tout tient dans cette cellule (ou copiez-la dans un notebook %run).
+#  Vous mettez VOS fonctions, elles retournent une phrase, la phrase
+#  s'affiche dans le bloc "Résultats" de la section. C'est tout.
 #
-#  PRINCIPE : ce qui s'affiche = l'OUTPUT de vos fonctions déjà codées.
-#  Vous n'avez qu'à enregistrer vos fonctions dans le PIPELINE (tout en bas),
-#  section par section. L'ordre dans la liste = l'ordre d'affichage.
+#  - Une fonction qui retourne une PHRASE (str)      -> ligne de vérification
+#  - Une fonction qui retourne un DATAFRAME          -> table (bloc Tables & visuels)
+#  - Une fonction qui retourne une FIGURE matplotlib -> visuel (bloc Tables & visuels)
 #
-#  Ce que peut retourner une fonction (détection automatique) :
-#    - un DataFrame pandas ou Spark ................ affiché en TABLE
-#    - une figure matplotlib ....................... affichée en IMAGE
-#    - un dict {"statut": "ok"|"alerte"|"ko", ...} . affiché en POINT DE CONTRÔLE
-#    - un dict {"labels": [...], "series": [...]} .. affiché en GRAPHIQUE Chart.js
-#    - un dict {"colonnes": [...], "lignes": [...]}  affiché en TABLE
-#    - une LISTE de tout cela ...................... plusieurs affichages
-#  Vous pouvez aussi utiliser les aides checkpoint() / table() / visuel()
-#  pour un contrôle total, mais ce n'est pas obligatoire.
+#  Couleur automatique de la ligne selon la phrase : si elle contient
+#  "KO" -> rouge, "alerte" -> orange, "OK" -> vert, sinon neutre (bleu).
 #
-#  Dernière ligne : displayHTML(...) affiche le rapport interactif.
+#  Pour ajouter / retirer / déplacer une vérification : modifier la liste
+#  "resultats" de la section dans SECTIONS. L'ordre = l'ordre d'affichage.
 # ============================================================================
 
-import base64
-import io
-import json
-from datetime import datetime
 
-# ----------------------------------------------------------------------------
-# AIDES FACULTATIVES — à utiliser dans vos fonctions si vous voulez
-# préciser titre, statut, seuil, etc. Sinon la détection auto s'en charge.
-# ----------------------------------------------------------------------------
-def checkpoint(libelle, statut, valeur, seuil="", commentaire=""):
-    """statut : 'ok' | 'alerte' | 'ko'"""
-    return {"_type": "checkpoint", "libelle": libelle, "statut": statut,
-            "valeur": str(valeur), "seuil": str(seuil), "commentaire": commentaire}
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  1. VOS FONCTIONS — remplacez le contenu par votre code                  ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
 
-def table(titre, colonnes, lignes):
-    return {"_type": "table", "titre": titre, "colonnes": list(colonnes),
-            "lignes": [[str(v) for v in l] for l in lignes]}
+# ------------------------------- GLOBALE ------------------------------------
+def F1():
+    # votre code ici
+    return "F1 : ..."
 
-def visuel(titre, type_graph, labels, series):
-    """type_graph : 'line' | 'bar' | 'doughnut'
-       series : [{"nom": "...", "valeurs": [...]}, ...]"""
-    return {"_type": "visuel", "titre": titre, "type": type_graph,
-            "labels": list(labels), "series": series}
+def F2():
+    # votre code ici
+    return "F2 : ..."
 
-# ----------------------------------------------------------------------------
-# DÉTECTION AUTOMATIQUE de l'output d'une fonction — ne pas modifier
-# ----------------------------------------------------------------------------
-_MAX_LIGNES_TABLE = 500  # sécurité d'affichage pour les DataFrames
+def F3():
+    # votre code ici
+    return "F3 : ..."
 
-def _df_pandas_en_table(df, titre):
-    df = df.head(_MAX_LIGNES_TABLE)
-    return table(titre, [str(c) for c in df.columns],
-                 df.astype(str).values.tolist())
+def F4():
+    # votre code ici
+    return "F4 : ..."
 
-def _figure_en_image(fig, titre):
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=110, bbox_inches="tight")
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    return {"_type": "visuel", "titre": titre, "type": "image",
-            "contenu": "data:image/png;base64," + b64}
+def F5():
+    # votre code ici
+    return "F5 : ..."
 
-def _normaliser(sortie, nom_fonction):
-    """Transforme l'output brut d'une fonction en éléments affichables."""
-    if sortie is None:
-        return []
-    if isinstance(sortie, (list, tuple)):
-        elements = []
-        for s in sortie:
-            elements.extend(_normaliser(s, nom_fonction))
-        return elements
+def F6():
+    # votre code ici
+    return "F6 : ..."
 
-    # Dict : déjà typé par les aides, ou reconnu par ses clés
-    if isinstance(sortie, dict):
-        d = dict(sortie)
-        if "_type" not in d:
-            if "statut" in d:
-                d.setdefault("libelle", nom_fonction)
-                d.setdefault("valeur", "")
-                d.setdefault("seuil", "")
-                d.setdefault("commentaire", "")
-                d["_type"] = "checkpoint"
-            elif "labels" in d and "series" in d:
-                d.setdefault("titre", nom_fonction)
-                d.setdefault("type", "bar")
-                d["_type"] = "visuel"
-            elif "colonnes" in d and "lignes" in d:
-                d.setdefault("titre", nom_fonction)
-                d["_type"] = "table"
-            else:  # dict simple {label: valeur} -> table à 2 colonnes
-                return [table(nom_fonction, ["Indicateur", "Valeur"],
-                              [[k, v] for k, v in d.items()])]
-        if d["_type"] == "checkpoint":
-            d["valeur"] = str(d.get("valeur", ""))
-        return [d]
+def F7():
+    # votre code ici
+    return "F7 : ..."
 
-    # DataFrame Spark
-    if hasattr(sortie, "toPandas"):
-        return [_df_pandas_en_table(sortie.limit(_MAX_LIGNES_TABLE).toPandas(),
-                                    nom_fonction)]
-    # DataFrame pandas
-    if hasattr(sortie, "columns") and hasattr(sortie, "values"):
-        return [_df_pandas_en_table(sortie, nom_fonction)]
-    # Figure matplotlib
-    if hasattr(sortie, "savefig"):
-        return [_figure_en_image(sortie, nom_fonction)]
-    # Axes matplotlib
-    if hasattr(sortie, "get_figure"):
-        return [_figure_en_image(sortie.get_figure(), nom_fonction)]
+# ------------------------------- AGENTS -------------------------------------
+def A1():
+    # votre code ici
+    return "A1 : ..."
 
-    # Tout le reste (str, nombre...) -> point d'information neutre
-    return [checkpoint(libelle=nom_fonction, statut="ok", valeur=str(sortie))]
+# ------------------------------- COURTIER -----------------------------------
+def C1():
+    # votre code ici
+    return "C1 : ..."
 
-# ----------------------------------------------------------------------------
-# ASSEMBLAGE ET AFFICHAGE — ne pas modifier
-# ----------------------------------------------------------------------------
-def generer_rapport(pipeline, periode=""):
-    rapport = {
-        "meta": {"periode": periode or datetime.now().strftime("%B %Y"),
-                 "genere_le": datetime.now().strftime("%Y-%m-%d %H:%M")},
-        "ordre_sections": list(pipeline.keys()),
-        "sections": {},
-    }
-    for cle, cfg in pipeline.items():
-        section = {"libelle": cfg.get("libelle", cle),
-                   "description": cfg.get("description", ""),
-                   "kpis": [{"label": k, "valeur": str(v)}
-                            for k, v in cfg.get("kpis", {}).items()],
-                   "checkpoints": [], "tables": [], "visuels": []}
-        for fonction in cfg.get("fonctions", []):
-            nom = getattr(fonction, "__name__", str(fonction))
+# ------------------------------- ANNEXE -------------------------------------
+def X1():
+    # votre code ici
+    return "X1 : ..."
+
+# ------------------------------- HORS KO ------------------------------------
+def H1():
+    # votre code ici
+    return "H1 : ..."
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  2. LES 5 BLOCS DU RAPPORT — placez vos fonctions dans les listes        ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+SECTIONS = {
+
+    "globale": {
+        "libelle": "Globale",
+        "description": "",
+        "resultats": [F1, F2, F3, F4, F5, F6, F7],
+        "tables_visuels": [],        # fonctions retournant DataFrame ou figure
+    },
+
+    "agents": {
+        "libelle": "Agents",
+        "description": "",
+        "resultats": [A1],
+        "tables_visuels": [],
+    },
+
+    "courtier": {
+        "libelle": "Courtier",
+        "description": "",
+        "resultats": [C1],
+        "tables_visuels": [],
+    },
+
+    "annexe": {
+        "libelle": "Annexe",
+        "description": "",
+        "resultats": [X1],
+        "tables_visuels": [],
+    },
+
+    "hors_ko": {
+        "libelle": "Hors KO",
+        "description": "",
+        "resultats": [H1],
+        "tables_visuels": [],
+    },
+}
+
+PERIODE = ""   # ex. "Juin 2026" — laissé vide sinon
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  3. MOTEUR D'AFFICHAGE — ne pas modifier                                 ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+def _generer_html():
+    import base64 as _b64
+    import io as _io
+    import json as _json
+    import re as _re
+    from datetime import datetime as _dt
+
+    def _statut(phrase):
+        if _re.search(r"\bKO\b", phrase, _re.I): return "ko"
+        if _re.search(r"alerte|warning", phrase, _re.I): return "alerte"
+        if _re.search(r"\bOK\b|conforme|valid", phrase, _re.I): return "ok"
+        return "info"
+
+    def _table(df, nom):
+        df = df.head(500)
+        return {"titre": nom, "source_fonction": nom,
+                "colonnes": [str(c) for c in df.columns],
+                "lignes": df.astype(str).values.tolist()}
+
+    def _image(fig, nom):
+        buf = _io.BytesIO()
+        fig.savefig(buf, format="png", dpi=110, bbox_inches="tight")
+        return {"titre": nom, "source_fonction": nom, "type": "image",
+                "contenu": "data:image/png;base64,"
+                           + _b64.b64encode(buf.getvalue()).decode("ascii")}
+
+    rapport = {"meta": {"periode": PERIODE or "—",
+                        "genere_le": _dt.now().strftime("%Y-%m-%d %H:%M")},
+               "ordre_sections": list(SECTIONS.keys()), "sections": {}}
+
+    for cle, cfg in SECTIONS.items():
+        sec = {"libelle": cfg.get("libelle", cle),
+               "description": cfg.get("description", ""),
+               "kpis": [], "checkpoints": [], "tables": [], "visuels": []}
+
+        for f in cfg.get("resultats", []):
+            nom = getattr(f, "__name__", str(f))
             try:
-                elements = _normaliser(fonction(), nom)
-            except Exception as e:  # une fonction en erreur devient un KO visible
-                elements = [checkpoint(libelle=f"Exécution de {nom}",
-                                       statut="ko", valeur="ERREUR",
-                                       commentaire=str(e))]
-            for el in elements:
-                el.setdefault("source_fonction", nom)
-                genre = el.pop("_type")
-                if genre == "checkpoint":
-                    el["fonction"] = el.pop("source_fonction")
-                    section["checkpoints"].append(el)
-                elif genre == "table":
-                    section["tables"].append(el)
-                else:
-                    section["visuels"].append(el)
-        rapport["sections"][cle] = section
-    return _GABARIT_HTML.replace("__DONNEES_JSON__",
-                                 json.dumps(rapport, ensure_ascii=False))
+                phrase = str(f())
+                sec["checkpoints"].append(
+                    {"fonction": nom, "phrase": phrase, "statut": _statut(phrase)})
+            except Exception as e:
+                sec["checkpoints"].append(
+                    {"fonction": nom, "phrase": f"KO — erreur d'exécution : {e}",
+                     "statut": "ko"})
 
-# ----------------------------------------------------------------------------
-# GABARIT HTML (design, interactions, graphiques) — ne pas modifier
-# ----------------------------------------------------------------------------
-_GABARIT_HTML = r"""<!DOCTYPE html>
+        for f in cfg.get("tables_visuels", []):
+            nom = getattr(f, "__name__", str(f))
+            try:
+                sortie = f()
+                if hasattr(sortie, "toPandas"):
+                    sec["tables"].append(_table(sortie.limit(500).toPandas(), nom))
+                elif hasattr(sortie, "columns") and hasattr(sortie, "values"):
+                    sec["tables"].append(_table(sortie, nom))
+                elif hasattr(sortie, "savefig"):
+                    sec["visuels"].append(_image(sortie, nom))
+                elif hasattr(sortie, "get_figure"):
+                    sec["visuels"].append(_image(sortie.get_figure(), nom))
+            except Exception as e:
+                sec["checkpoints"].append(
+                    {"fonction": nom, "phrase": f"KO — erreur d'exécution : {e}",
+                     "statut": "ko"})
+        rapport["sections"][cle] = sec
+
+    return _GABARIT.replace("__DONNEES_JSON__",
+                            _json.dumps(rapport, ensure_ascii=False))
+
+
+_GABARIT = r"""<!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
@@ -266,7 +298,7 @@ _GABARIT_HTML = r"""<!DOCTYPE html>
   .controle{
     background:var(--blanc);border:1px solid var(--ligne);border-radius:var(--rayon);
     padding:14px 18px;margin-bottom:10px;
-    display:grid;grid-template-columns:34px 1fr auto auto;gap:14px;align-items:center;
+    display:grid;grid-template-columns:34px 1fr auto;gap:14px;align-items:center;
   }
   .controle .num{font-family:"IBM Plex Mono",monospace;font-size:.78rem;color:var(--texte-2)}
   .controle .lib{font-weight:500;font-size:.92rem}
@@ -278,6 +310,9 @@ _GABARIT_HTML = r"""<!DOCTYPE html>
   .statut.ok{background:var(--ok-bg);color:var(--ok)}
   .statut.alerte{background:var(--alerte-bg);color:var(--alerte)}
   .statut.ko{background:var(--ko-bg);color:var(--ko)}
+  .statut.info{background:var(--bleu-pale);color:var(--bleu-primaire)}
+  .pastille.info{background:var(--bleu-pale);color:var(--bleu-primaire)}
+  .controle.est-info{border-left:3px solid var(--bleu-moyen)}
   .controle.est-ko{border-left:3px solid var(--ko)}
   .controle.est-alerte{border-left:3px solid var(--alerte)}
   .controle.est-ok{border-left:3px solid var(--ok)}
@@ -378,14 +413,14 @@ const RAPPORT = __DONNEES_JSON__;
    MOTEUR DE RENDU — ne pas modifier lors des mises à jour de données
    ================================================================ */
 const PALETTE_GRAPH = ["#17497E", "#3E6FA3", "#9DBCDD", "#0A1D33", "#6E93BC"];
-const LIBELLE_STATUT = { ok: "OK", alerte: "ALERTE", ko: "KO" };
+const LIBELLE_STATUT = { ok: "OK", alerte: "ALERTE", ko: "KO", info: "INFO" };
 let graphiquesActifs = [];
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 
 function compter(section) {
-  const c = { ok: 0, alerte: 0, ko: 0 };
+  const c = { ok: 0, alerte: 0, ko: 0, info: 0, total: section.checkpoints.length };
   section.checkpoints.forEach(p => c[p.statut] = (c[p.statut] || 0) + 1);
   return c;
 }
@@ -410,7 +445,7 @@ function rendreAccueil() {
       <p>${esc(s.description)}</p>
       <div class="carte-pied">
         <div class="compteurs">
-          <span class="pastille ok">${c.ok} OK</span>
+          <span class="pastille info">${c.total} vérification${c.total>1?"s":""}</span>
           ${c.alerte ? `<span class="pastille alerte">${c.alerte} alerte${c.alerte>1?"s":""}</span>` : ""}
           ${c.ko ? `<span class="pastille ko">${c.ko} KO</span>` : ""}
         </div>
@@ -423,15 +458,19 @@ function rendreAccueil() {
 
 function rendreCheckpoints(section) {
   const bloc = $("bloc-resultats");
+  if (!section.checkpoints.length) {
+    bloc.innerHTML = `<div class="panneau" style="color:var(--texte-2);font-size:.88rem">
+      Aucune vérification pour l'instant — ajoutez vos fonctions dans la liste
+      <span class="mono">"resultats"</span> de cette section.</div>`;
+    return;
+  }
   bloc.innerHTML = section.checkpoints.map((p, i) => `
     <div class="controle est-${p.statut}">
       <div class="num">${String(i + 1).padStart(2, "0")}</div>
       <div>
-        <div class="lib">${esc(p.libelle)}</div>
+        <div class="lib">${esc(p.phrase)}</div>
         <div class="fonction">↳ ${esc(p.fonction)}()</div>
-        ${p.commentaire ? `<div class="comment">${esc(p.commentaire)}</div>` : ""}
       </div>
-      <div class="valeurs">${esc(p.valeur)}<br><span class="seuil">seuil : ${esc(p.seuil)}</span></div>
       <span class="statut ${p.statut}">${LIBELLE_STATUT[p.statut] || p.statut}</span>
     </div>`).join("");
 }
@@ -441,6 +480,12 @@ function rendreTablesEtVisuels(section) {
   graphiquesActifs = [];
   const bloc = $("bloc-visuels");
   bloc.innerHTML = "";
+  if (!(section.tables || []).length && !(section.visuels || []).length) {
+    bloc.innerHTML = `<div class="panneau" style="color:var(--texte-2);font-size:.88rem">
+      Aucune table ni visuel — ajoutez dans <span class="mono">"tables_visuels"</span>
+      une fonction retournant un DataFrame (pandas ou Spark) ou une figure matplotlib.</div>`;
+    return;
+  }
 
   (section.tables || []).forEach(t => {
     const p = document.createElement("div");
@@ -513,7 +558,7 @@ function ouvrirSection(cle) {
 
   const c = compter(s);
   $("section-compteurs").innerHTML = `
-    <span class="pastille ok">${c.ok} OK</span>
+    <span class="pastille info">${c.total} vérification${c.total>1?"s":""}</span>
     ${c.alerte ? `<span class="pastille alerte">${c.alerte} alerte${c.alerte>1?"s":""}</span>` : ""}
     ${c.ko ? `<span class="pastille ko">${c.ko} KO</span>` : ""}`;
 
@@ -552,74 +597,4 @@ rendreAccueil();
 </html>
 """
 
-# ============================================================================
-#  >>> VOTRE ZONE <<<  — enregistrez ici VOS fonctions déjà codées
-# ============================================================================
-#  Exemples de démonstration (à supprimer et remplacer par les vôtres).
-#  Une fonction = un output = un affichage. Aucune règle sur le contenu.
-
-def exemple_controle_volumetrie():
-    nb = 48_217
-    return checkpoint("Volumétrie du portefeuille", 
-                      statut="ok" if nb > 45_000 else "ko",
-                      valeur=f"{nb:,}".replace(",", " "),
-                      seuil="> 45 000")
-
-def exemple_table_pandas():
-    import pandas as pd
-    return pd.DataFrame({"Mois": ["Mai 2026", "Juin 2026"],
-                         "Renouvelés": [41_290, 42_142],
-                         "Taux (%)": [87.2, 87.4]})
-
-def exemple_graphique():
-    return visuel("Évolution du taux de renouvellement", "line",
-                  labels=["Janv.", "Févr.", "Mars", "Avr.", "Mai", "Juin"],
-                  series=[{"nom": "Taux (%)",
-                           "valeurs": [86.5, 86.3, 87.1, 87.0, 87.2, 87.4]},
-                          {"nom": "Objectif (%)", "valeurs": [85] * 6}])
-
-# ----------------------------------------------------------------------------
-# PIPELINE : vos 5 sections. Ajoutez / déplacez vos fonctions dans les listes.
-# ----------------------------------------------------------------------------
-PIPELINE = {
-    "globale": {
-        "libelle": "Globale",
-        "description": "Portefeuille auto complet — tous réseaux confondus.",
-        "kpis": {"Contrats à renouveler": "48 217",
-                 "Taux de renouvellement": "87,4 %"},
-        "fonctions": [
-            exemple_controle_volumetrie,   # <- remplacez par vos fonctions
-            exemple_table_pandas,
-            exemple_graphique,
-        ],
-    },
-    "agents": {
-        "libelle": "Agents",
-        "description": "Réseau des agents généraux mandataires.",
-        "kpis": {},
-        "fonctions": [],                   # <- vos fonctions ici
-    },
-    "courtier": {
-        "libelle": "Courtier",
-        "description": "Portefeuille apporté par le réseau de courtage.",
-        "kpis": {},
-        "fonctions": [],
-    },
-    "annexe": {
-        "libelle": "Annexe",
-        "description": "Canaux annexes : partenariats, affinitaire, direct.",
-        "kpis": {},
-        "fonctions": [],
-    },
-    "hors_ko": {
-        "libelle": "Hors KO",
-        "description": "Périmètre hors rejets techniques (KO).",
-        "kpis": {},
-        "fonctions": [],
-    },
-}
-
-# ----------------------------------------------------------------------------
-# AFFICHAGE dans la cellule Databricks
-# ----------------------------------------------------------------------------
-displayHTML(generer_rapport(PIPELINE, periode="Juin 2026"))  # noqa: F821
+displayHTML(_generer_html())  # noqa: F821
