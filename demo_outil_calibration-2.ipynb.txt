@@ -1,0 +1,151 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Outil interactif de calibration des courbes ELR × Prime\n",
+    "\n",
+    "Calibrage des coefficients `a, b, l, m, n, min, max` de la formule de majoration,\n",
+    "par population (A → F), avec recalcul en temps réel de la courbe et des métriques.\n",
+    "\n",
+    "**Formule** : `Valeur = (a·log(E) + b) × (l + log(P·m) + n)` puis `Maj. initiale = min(max, max(min, Valeur))`,\n",
+    "suivie des 5 fonctions d'ajustement, puis `Nouvelle prime = Prime_avant × Maj. finale`\n",
+    "et `Ressource finale = Σ nouvelles primes / Σ anciennes primes`.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 1. Chargement\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "from outil_calibration import (\n",
+    "    generer_base_test, afficher_outil, sauvegarder_html,\n",
+    "    calculer_resultats, PARAMS_INITIAUX,\n",
+    ")\n",
+    "import pandas as pd\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 2. Base de contrats\n",
+    "\n",
+    "Base de test générée ci-dessous — remplacez par votre propre base :\n",
+    "`df = pd.read_csv('mes_contrats.csv')` (colonnes requises : `Population_courbe`, `ELR`,\n",
+    "`PrimeSS`, `Prime_avant` ; optionnelles pour les ajustements d'exemple : `Anciennete`, `Segment_sensible`).\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "df = generer_base_test(8000)\n",
+    "# df = pd.read_csv('base_test_contrats.csv')   # ou votre base réelle\n",
+    "df.head()\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 3. Outil interactif\n",
+    "\n",
+    "- **Pastilles A→F** : population calibrée (un point orange signale des coefficients modifiés).\n",
+    "- **Sliders** : le graphique et les métriques se recalculent instantanément pendant le glissement.\n",
+    "- **Courbe ambre pointillée** : référence figée (coefficients initiaux). **Courbe sarcelle** : coefficients courants.\n",
+    "- **Barres grises** (axe gauche) : nombre de contrats par tranche de prime (200 → 1600, pas de 50).\n",
+    "- **Réinitialiser** : la population courante, ou l'ensemble des populations.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "afficher_outil(df, PARAMS_INITIAUX, echeance='01/01/2027', annee=2026)\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 4. Validation hors outil (moteur Python vectorisé)\n",
+    "\n",
+    "Le même calcul en pandas/numpy, pour vérifier ou exporter les résultats contrat par contrat.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "resultats, ressource = calculer_resultats(df, PARAMS_INITIAUX)\n",
+    "print(f'Ressource finale : {ressource:.6f}')\n",
+    "resultats[['Num_contrat','Population_courbe','ELR','PrimeSS','Prime_avant',\n",
+    "           'Majoration_initiale','Majoration_finale','Nouvelle_prime']].head(10)\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 5. Export d'une version autonome (HTML)\n",
+    "\n",
+    "Fichier ouvrable dans n'importe quel navigateur, à partager sans Python.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "sauvegarder_html('outil_calibration.html', df, PARAMS_INITIAUX,\n",
+    "                 echeance='01/01/2027', annee=2026)\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 6. Adapter les 5 fonctions d'ajustement\n",
+    "\n",
+    "Les ajustements sont définis **deux fois** dans `outil_calibration.py` :\n",
+    "\n",
+    "1. En **Python** (`ajustement_1_…` à `ajustement_5_…`) — utilisés par `calculer_resultats`.\n",
+    "2. En **JavaScript** (`AJUSTEMENTS_JS`) — utilisés par l'outil interactif pour rester fluide.\n",
+    "\n",
+    "Remplacez les corps des deux versions par vos règles métier en gardant la même logique\n",
+    "des deux côtés. Le test de parité fourni (`test_parite.js`) permet de vérifier que les\n",
+    "deux moteurs donnent exactement la même ressource finale.\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "name": "python",
+   "version": "3.11"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
