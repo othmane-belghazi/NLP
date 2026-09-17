@@ -1,31 +1,56 @@
 import numpy as np
 import pandas as pd
 
+
 # Paramètres
 COEF_MIN = 1.14
 COEF_MAX = 1.30
 
-# 1. Population de calibration :
-# uniquement les clients avec exactement 1 sinistre responsable
-mask_1_sinistre = df["nb_sinistres"] == 1
+# --------------------------------------------------
+# 1. Population avec exactement 1 sinistre
+# --------------------------------------------------
+mask_1 = df["nb_sinistres"] == 1
 
-montants_1 = df.loc[mask_1_sinistre, "montant_sinistre"].dropna()
+# On travaille sur le montant
+montant = df.loc[mask_1, "montant_sinistre"].clip(lower=0)
 
-# 2. Bornes robustes : P5 et P95
-P5 = montants_1.quantile(0.05)
-P95 = montants_1.quantile(0.95)
+# --------------------------------------------------
+# 2. Transformation log
+# --------------------------------------------------
+montant_log = np.log1p(montant)
 
-# 3. Calcul du score montant entre 0 et 1
-score_montant = (
-    (df["montant_sinistre"] - P5) / (P95 - P5)
-).clip(0, 1)
+# --------------------------------------------------
+# 3. Rang percentile
+# --------------------------------------------------
+n = len(montant_log)
 
-# 4. Calcul du coefficient
-df["coefficient_majoration"] = np.where(
-    df["nb_sinistres"] >= 2,
-    COEF_MAX,
-    COEF_MIN + (COEF_MAX - COEF_MIN) * score_montant
+rang = montant_log.rank(method="average")
+
+percentile = (rang - 0.5) / n
+
+# --------------------------------------------------
+# 4. Transformation en coefficient
+# --------------------------------------------------
+coef_1 = (
+    COEF_MIN
+    + (COEF_MAX - COEF_MIN) * percentile
 )
 
-# 5. Arrondi éventuel
-df["coefficient_majoration"] = df["coefficient_majoration"].round(3)
+# --------------------------------------------------
+# 5. Règle finale
+# --------------------------------------------------
+df["coefficient_majoration"] = np.nan
+
+# 1 sinistre
+df.loc[mask_1, "coefficient_majoration"] = coef_1
+
+# 2 sinistres ou plus
+df.loc[
+    df["nb_sinistres"] >= 2,
+    "coefficient_majoration"
+] = COEF_MAX
+
+# Arrondi
+df["coefficient_majoration"] = (
+    df["coefficient_majoration"].round(3)
+)
