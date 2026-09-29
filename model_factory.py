@@ -1,19 +1,21 @@
 from pyspark.sql import functions as F
 
 # ============================================================
-# 1. Paramètres de calibration
+# PARAMÈTRES
 # ============================================================
 
-P_BAS = 0.10       # P10
-P_HAUT = 0.95      # P95
+P_BAS = 0.10       # seuil bas global : P10
+P_HAUT = 0.95      # seuil haut global : P95
 
 MAJ_MIN = 1.14
 MAJ_MAX = 1.30
-AMPLITUDE = MAJ_MAX - MAJ_MIN
+
+ALPHA = 2.0        # courbe convexe : x²
 
 
 # ============================================================
-# 2. Calcul de Cbas et Chaut sur l'ensemble de la population
+# 1. CALCUL DES SEUILS GLOBAUX
+#    IMPORTANT : pas de calcul par échéance
 # ============================================================
 
 quantiles = (
@@ -29,95 +31,71 @@ quantiles = (
     )
 )
 
-# Récupération des deux valeurs
 params = quantiles.collect()[0]
 
-C_bas = params["C_bas"]
-C_haut = params["C_haut"]
+C_bas = float(params["C_bas"])
+C_haut = float(params["C_haut"])
 
-print(f"C_bas  (P10) = {C_bas:,.2f}")
-print(f"C_haut (P95) = {C_haut:,.2f}")
+print(f"C_bas  = {C_bas:.2f} €")
+print(f"C_haut = {C_haut:.2f} €")
 
 
 # ============================================================
-# 3. Application de la nouvelle méthode
+# 2. NORMALISATION DE LA CHARGE
 # ============================================================
 
 df_new = (
     df
 
-    # --------------------------------------------------------
-    # Transformation logarithmique
-    # --------------------------------------------------------
-    .withColumn(
-        "charge_log",
-        F.log1p(F.col("charges_Sinistre"))
-    )
-
-    # --------------------------------------------------------
-    # Bornes dans l'espace logarithmique
-    # --------------------------------------------------------
-    .withColumn(
-        "log_C_bas",
-        F.lit(float(__import__("math").log1p(C_bas)))
-    )
-    .withColumn(
-        "log_C_haut",
-        F.lit(float(__import__("math").log1p(C_haut)))
-    )
-
-    # --------------------------------------------------------
-    # Normalisation x entre 0 et 1
-    # --------------------------------------------------------
+    # Position de la charge entre C_bas et C_haut
     .withColumn(
         "x_brut",
         (
-            (F.col("charge_log") - F.col("log_C_bas"))
-            /
-            (F.col("log_C_haut") - F.col("log_C_bas"))
+            F.col("charges_Sinistre") - F.lit(C_bas)
         )
+        /
+        F.lit(C_haut - C_bas)
     )
 
-    # --------------------------------------------------------
-    # Bornage [0,1]
-    # --------------------------------------------------------
+    # On borne entre 0 et 1
     .withColumn(
         "x",
-        F.when(F.col("x_brut") < 0, 0.0)
-         .when(F.col("x_brut") > 1, 1.0)
+        F.when(F.col("x_brut") <= 0, F.lit(0.0))
+         .when(F.col("x_brut") >= 1, F.lit(1.0))
          .otherwise(F.col("x_brut"))
     )
 
-    # --------------------------------------------------------
-    # Smoothstep
+    # ========================================================
+    # 3. COURBE CONVEXE
+    # ========================================================
     #
-    # f(x) = 3x² - 2x³
-    # --------------------------------------------------------
+    # x = 0     -> 1.14
+    # x = 0.5   -> 1.18
+    # x = 1     -> 1.30
+    #
     .withColumn(
-        "smoothstep",
-        3 * F.pow(F.col("x"), 2)
-        - 2 * F.pow(F.col("x"), 3)
+        "x_alpha",
+        F.pow(F.col("x"), F.lit(ALPHA))
     )
 
-    # --------------------------------------------------------
-    # Nouvelle majoration
-    # --------------------------------------------------------
-    .withColumn(
-        "majoration_nouvelle",
-        F.lit(MAJ_MIN)
-        + F.lit(AMPLITUDE) * F.col("smoothstep")
-    )
+    # ========================================================
+    # 4. CALCUL DE LA NOUVELLE MAJORATION
+    # ========================================================
 
-    # Arrondi éventuel à 4 décimales
     .withColumn(
         "majoration_nouvelle",
-        F.round(F.col("majoration_nouvelle"), 4)
+        F.round(
+            F.lit(MAJ_MIN)
+            + (F.lit(MAJ_MAX) - F.lit(MAJ_MIN))
+            * F.col("x_alpha"),
+            4
+        )
     )
 )
 
 
 # ============================================================
-# 4. Comparaison avec l'ancienne majoration
+# 5. COMPARAISON AVEC L'ANCIENNE MAJORATION
 # ============================================================
 
 df_compare = (
@@ -150,20 +128,3 @@ df_compare = (
          .otherwise("IDENTIQUE")
     )
 )
-
-
-# ============================================================
-# 5. Vue individuelle
-# ============================================================
-
-df_compare.select(
-    "ID",
-    "charges_Sinistre",
-    "majoration_ancienne",
-    "majoration_nouvelle",
-    "ecart",
-    "ecart_absolu",
-    "ecart_relatif",
-    "hausse_baisse",
-    "x"
-).show(30, truncate=False)
