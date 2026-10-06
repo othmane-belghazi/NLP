@@ -1,721 +1,339 @@
-# -*- coding: utf-8 -*-
+"""Scoring de contrats sinistres, par etapes. PySpark 3.5+.
+
+Entree : UNE ligne par contrat et une meme date d'arrete pour tous les compteurs.
+Les slots 1 a n contiennent tous les sinistres recents, sans trou, jusqu'a 4.
+Les slots inutilises ont un statut NULL ou vide.
+Les charges sont celles des sinistres sur 12 mois (pas 13 mois).
+Les compteurs anciens concernent la fenetre 12-24 mois, pas un cumul sur 24 mois.
+Un historique incomplet reste NULL et ne doit pas etre remplace par zero.
+
+Colonnes attendues, ou a fournir dans correspondance :
+id_contrat, nb_resp_12m, nb_non_resp_12m, nb_total_12_24m, nb_resp_12_24m,
+statut_1, responsabilite_1, charge_1, ... jusqu'a statut_4, responsabilite_4, charge_4.
+
+Statuts : EN COURS/ENCOURS/OUVERT ou CLOS/CLOTURE/FERME, accents acceptes.
+Responsabilites : TOTAL/TOTALE/RESPONSABLE, PARTIEL/PARTIELLE,
+NON RESPONSABLE/NR, ou un taux numerique selon unite_responsabilite.
+Exemple en mode pourcentage : 50 ou '50%' = 0.5. 1 = 1%, PAS 100%.
+PARTIELLE sans taux reel utilise responsabilite_partielle, hypothese configurable.
+Charges : valeurs numeriques en euros, ou chaines numeriques avec point decimal.
+
+Sortie : donnees canoniques, variables retenues, cinq scores, contributions,
+coefficient_majoration, majoration_pct, statut_calcul et motifs_blocage.
+HORS_PERIMETRE : coefficient 1, majoration 0, score global NULL.
+NON_CALCULABLE : coefficient et score NULL. Aucun calcul sur les seuls 4 premiers
+sinistres lorsque les compteurs indiquent davantage de sinistres.
+
+Les poids, seuils et forfaits sont des hypotheses illustratives non calibrees.
+Pas de UDF Python, pas de collect() ou d'ecriture automatique de la base.
 """
-Outil interactif de calibration des courbes ELR × Prime
-=======================================================
 
-Usage dans un Jupyter Notebook :
+import math
 
-    from outil_calibration import generer_base_test, afficher_outil, PARAMS_INITIAUX
+from pyspark.sql import DataFrame
+from pyspark.sql import Window
+from pyspark.sql import functions as F
 
-    df = generer_base_test(8000)          # ou votre propre DataFrame
-    afficher_outil(df, PARAMS_INITIAUX, echeance="01/01/2027", annee=2026)
 
-Le DataFrame doit contenir au minimum les colonnes :
-    - Population_courbe : 'A' … 'F'
-    - ELR               : valeur E de la formule
-    - PrimeSS           : valeur P de la formule (sert aussi au tranchage 200→1600)
-    - Prime_avant       : prime avant majoration
-Colonnes optionnelles utilisées par les fonctions d'ajustement d'exemple :
-    - Anciennete, Segment_sensible
-
-Formule :
-    Valeur              = (a·log(E) + b) × (l + log(P·m) + n)      (log népérien)
-    Majoration initiale = min(max, max(min, Valeur))
-    Majoration finale   = ajustements 1→5 appliqués en chaîne
-    Nouvelle prime      = Prime_avant × Majoration finale
-    Ressource finale    = Σ nouvelles primes / Σ anciennes primes
-"""
-
-import json
-import html as _html
-import numpy as np
-import pandas as pd
-
-# ---------------------------------------------------------------------------
-# 1. Paramètres initiaux par population
-# ---------------------------------------------------------------------------
-
-PARAMS_INITIAUX = {
-    "A": {"a": 0.080, "b": 1.020, "l": 0.30, "m": 0.0020, "n": 0.65, "min": 0.95, "max": 1.35},
-    "B": {"a": 0.060, "b": 1.000, "l": 0.25, "m": 0.0022, "n": 0.70, "min": 0.93, "max": 1.30},
-    "C": {"a": 0.100, "b": 1.050, "l": 0.35, "m": 0.0018, "n": 0.60, "min": 0.97, "max": 1.40},
-    "D": {"a": 0.050, "b": 0.980, "l": 0.20, "m": 0.0025, "n": 0.75, "min": 0.92, "max": 1.28},
-    "E": {"a": 0.090, "b": 1.030, "l": 0.32, "m": 0.0019, "n": 0.62, "min": 0.96, "max": 1.38},
-    "F": {"a": 0.070, "b": 1.010, "l": 0.28, "m": 0.0021, "n": 0.68, "min": 0.94, "max": 1.32},
+POIDS_PAR_DEFAUT = {
+    "statut": 0.10,
+    "responsabilite": 0.25,
+    "charge": 0.40,
+    "nombre_12m": 0.175,
+    "historique": 0.075,
 }
 
-POPULATIONS = ["A", "B", "C", "D", "E", "F"]
 
-# Bornes des sliders (min, max, pas)
-BORNES_SLIDERS = {
-    "a":   (-0.30, 0.30, 0.005),
-    "b":   (0.50, 1.50, 0.005),
-    "l":   (-1.00, 1.00, 0.01),
-    "m":   (0.0005, 0.0060, 0.0001),
-    "n":   (-1.00, 1.50, 0.01),
-    "min": (0.80, 1.20, 0.005),
-    "max": (1.00, 1.80, 0.005),
-}
-
-# Tranches de prime : 200 → 1600, pas de 50  (28 tranches)
-TRANCHE_MIN, TRANCHE_MAX, TRANCHE_PAS = 200, 1600, 50
+def _col(nom):
+    # Les backticks permettent aussi les noms de colonnes avec espaces ou points.
+    return F.col("`" + nom.replace("`", "``") + "`")
 
 
-# ---------------------------------------------------------------------------
-# 2. Fonctions d'ajustement (référence Python)
-#    >>> Remplacez le corps de ces 5 fonctions par les vôtres. <<<
-#    Chaque fonction reçoit la majoration courante et la ligne du contrat,
-#    et renvoie la majoration ajustée. Elles sont appliquées dans l'ordre 1→5.
-#    IMPORTANT : le miroir JavaScript (AJUSTEMENTS_JS plus bas) doit rester
-#    identique pour que l'outil interactif reproduise exactement vos règles.
-# ---------------------------------------------------------------------------
-
-def ajustement_1_segment_sensible(maj, contrat):
-    """Plafonne la majoration à 1.10 pour les segments sensibles."""
-    if contrat.get("Segment_sensible", 0) == 1:
-        return min(maj, 1.10)
-    return maj
+def _nombre(nom):
+    # TRY_CAST laisse les valeurs non convertibles a NULL, meme en mode ANSI.
+    identifiant = "`" + nom.replace("`", "``") + "`"
+    return F.expr("try_cast(" + identifiant + " as double)")
 
 
-def ajustement_2_anciennete(maj, contrat):
-    """Réduit de 20 % l'écart à 1 pour les contrats d'ancienneté ≥ 10 ans."""
-    if contrat.get("Anciennete", 0) >= 10:
-        return 1.0 + (maj - 1.0) * 0.80
-    return maj
+def _fini(colonne):
+    return colonne.isNotNull() & (~F.isnan(colonne)) & (F.abs(colonne) != F.lit(float("inf")))
 
 
-def ajustement_3_sinistralite(maj, contrat):
-    """Ajoute +0.02 si l'ELR dépasse 1.20."""
-    if contrat["ELR"] > 1.20:
-        return maj + 0.02
-    return maj
+def _compteur_valide(colonne):
+    return _fini(colonne) & (colonne >= 0) & (colonne == F.floor(colonne))
 
 
-def ajustement_4_petite_prime(maj, contrat):
-    """Plafonne à 1.15 les contrats dont la PrimeSS est inférieure à 300."""
-    if contrat["PrimeSS"] < 300:
-        return min(maj, 1.15)
-    return maj
+def _texte_code(nom):
+    texte = F.upper(F.trim(_col(nom).cast("string")))
+    texte = F.translate(texte, "AEIOU\u00c0\u00c1\u00c2\u00c4\u00c8\u00c9\u00ca\u00cb\u00cc\u00cd\u00ce\u00cf\u00d2\u00d3\u00d4\u00d6\u00d9\u00da\u00db\u00dc\u00c7", "AEIOUAAAAEEEEIIIIOOOOUUUUC")
+    return F.regexp_replace(texte, r"[\s_\-]+", "")
 
 
-def ajustement_5_bornage_final(maj, contrat):
-    """Bornage réglementaire final [0.85 ; 1.60]."""
-    return min(1.60, max(0.85, maj))
+def _borne_01(colonne):
+    # LEAST/GREATEST ignorent les NULL : ce test evite de transformer un NULL en 1.
+    return F.when(_fini(colonne), F.least(F.lit(1.0), F.greatest(F.lit(0.0), colonne)))
 
 
-AJUSTEMENTS = [
-    ajustement_1_segment_sensible,
-    ajustement_2_anciennete,
-    ajustement_3_sinistralite,
-    ajustement_4_petite_prime,
-    ajustement_5_bornage_final,
-]
+def calculer_scoring(
+    df: DataFrame,
+    *,
+    charge_en_cours: float,
+    correspondance=None,
+    unite_responsabilite="pourcentage",
+    responsabilite_partielle=0.50,
+    poids_non_responsable=0.50,
+    seuil_nombre_12m=2.0,
+    seuil_historique=2.0,
+    charge_echelle=1000.0,
+    charge_reference=15000.0,
+    historique_resp_cumul_24m=False,
+    poids=None,
+):
+    """correspondance = {nom_canonique: nom_reel_dans_df}.
 
-# Miroir JavaScript des 5 ajustements — à maintenir identique aux fonctions
-# Python ci-dessus. `maj` est la majoration courante, `c` le contrat
-# ({elr, prime, primeAvant, anc, seg}).
-AJUSTEMENTS_JS = r"""
-const AJUSTEMENTS = [
-  // 1. Segment sensible : plafond 1.10
-  (maj, c) => c.seg === 1 ? Math.min(maj, 1.10) : maj,
-  // 2. Ancienneté ≥ 10 ans : écart à 1 réduit de 20 %
-  (maj, c) => c.anc >= 10 ? 1.0 + (maj - 1.0) * 0.80 : maj,
-  // 3. ELR > 1.20 : +0.02
-  (maj, c) => c.elr > 1.20 ? maj + 0.02 : maj,
-  // 4. PrimeSS < 300 : plafond 1.15
-  (maj, c) => c.prime < 300 ? Math.min(maj, 1.15) : maj,
-  // 5. Bornage final [0.85 ; 1.60]
-  (maj, c) => Math.min(1.60, Math.max(0.85, maj)),
-];
-"""
+    charge_en_cours est un forfait PAR sinistre ouvert, pas par contrat.
+    Si historique_resp_cumul_24m=True, le compteur responsable ancien fourni
+    est un cumul 0-24 mois : on en soustrait les responsables 0-12 mois.
+    Le compteur nb_total_12_24m reste toujours un compteur de la fenetre 12-24.
+    Les zeros historiques sont acceptes si l'assurance et l'observation couvrent
+    reellement la periode complete. Le code ne peut pas le deduire des compteurs.
+    """
 
+    # ETAPE 1 : verifier les parametres avant de construire les expressions Spark.
+    p = dict(POIDS_PAR_DEFAUT if poids is None else poids)
+    if set(p) != set(POIDS_PAR_DEFAUT):
+        raise ValueError("Les poids doivent porter sur les cinq composantes attendues.")
+    if any(not math.isfinite(float(v)) or v < 0 for v in p.values()):
+        raise ValueError("Les poids doivent etre finis et positifs ou nuls.")
+    if not math.isclose(sum(p.values()), 1.0, abs_tol=1e-9):
+        raise ValueError("La somme des poids doit etre egale a 1.")
+    if unite_responsabilite not in {"pourcentage", "taux"}:
+        raise ValueError("unite_responsabilite doit etre 'pourcentage' ou 'taux'.")
+    if not (0 < responsabilite_partielle < 1):
+        raise ValueError("responsabilite_partielle doit etre strictement entre 0 et 1.")
+    if not (0 <= poids_non_responsable <= 1):
+        raise ValueError("poids_non_responsable doit etre entre 0 et 1.")
+    for valeur in (seuil_nombre_12m, seuil_historique, charge_echelle, charge_reference):
+        if not math.isfinite(float(valeur)) or valeur <= 0:
+            raise ValueError("Les seuils et echelles doivent etre finis et strictement positifs.")
+    if not math.isfinite(float(charge_en_cours)) or charge_en_cours < 0:
+        raise ValueError("Le forfait en cours doit etre fini et positif ou nul.")
 
-# ---------------------------------------------------------------------------
-# 3. Base de test
-# ---------------------------------------------------------------------------
-
-def generer_base_test(n=8000, graine=42):
-    """Génère une base de contrats synthétique pour tester l'outil."""
-    rng = np.random.default_rng(graine)
-    poids = [0.24, 0.20, 0.17, 0.15, 0.13, 0.11]
-    pop = rng.choice(POPULATIONS, size=n, p=poids)
-
-    prime = np.exp(rng.normal(6.35, 0.45, n))                 # ~ 400–1200
-    prime = np.clip(prime, TRANCHE_MIN, TRANCHE_MAX - 1).round(2)
-
-    elr = np.exp(rng.normal(-0.12, 0.28, n))                  # ~ 0.55–1.45
-    elr = np.clip(elr, 0.30, 2.20).round(4)
-
-    prime_avant = (prime * rng.uniform(0.95, 1.05, n)).round(2)
-    anciennete = rng.integers(0, 26, n)
-    segment = (rng.random(n) < 0.12).astype(int)
-
-    return pd.DataFrame({
-        "Num_contrat": [f"CT{100000 + i}" for i in range(n)],
-        "Population_courbe": pop,
-        "ELR": elr,
-        "PrimeSS": prime,
-        "Prime_avant": prime_avant,
-        "Anciennete": anciennete,
-        "Segment_sensible": segment,
-    })
-
-
-# ---------------------------------------------------------------------------
-# 4. Calcul de référence Python (vectorisé) — pour validation hors outil
-# ---------------------------------------------------------------------------
-
-def calculer_resultats(df, params):
-    """Renvoie une copie du df avec Majoration_finale et Nouvelle_prime,
-    ainsi que la ressource finale globale."""
-    out = df.copy()
-    maj = np.empty(len(df))
-    for popu, p in params.items():
-        masque = (df["Population_courbe"] == popu).to_numpy()
-        if not masque.any():
-            continue
-        E = df.loc[masque, "ELR"].to_numpy(float)
-        P = df.loc[masque, "PrimeSS"].to_numpy(float)
-        val = (p["a"] * np.log(E) + p["b"]) * (p["l"] + np.log(P * p["m"]) + p["n"])
-        maj[masque] = np.minimum(p["max"], np.maximum(p["min"], val))
-    out["Majoration_initiale"] = maj
-
-    finales = []
-    for i, ligne in enumerate(df.to_dict("records")):
-        v = maj[i]
-        for f in AJUSTEMENTS:
-            v = f(v, ligne)
-        finales.append(v)
-    out["Majoration_finale"] = finales
-    out["Nouvelle_prime"] = out["Prime_avant"] * out["Majoration_finale"]
-    ressource = out["Nouvelle_prime"].sum() / out["Prime_avant"].sum()
-    return out, ressource
-
-
-# ---------------------------------------------------------------------------
-# 5. Construction de l'outil HTML interactif
-# ---------------------------------------------------------------------------
-
-def construire_html(df, params=None, echeance="01/01/2027", annee=2026):
-    """Construit le document HTML autonome de l'outil (tout le recalcul est
-    fait côté navigateur pour une mise à jour fluide des sliders)."""
-    params = params or PARAMS_INITIAUX
-
-    colonnes_requises = {"Population_courbe", "ELR", "PrimeSS", "Prime_avant"}
-    manquantes = colonnes_requises - set(df.columns)
+    # ETAPE 2 : renommer les colonnes pour rendre le reste du code lisible.
+    compteurs = ["nb_resp_12m", "nb_non_resp_12m", "nb_total_12_24m", "nb_resp_12_24m"]
+    colonnes = ["id_contrat"] + compteurs
+    for j in range(1, 5):
+        colonnes += [f"statut_{j}", f"responsabilite_{j}", f"charge_{j}"]
+    noms = {nom: nom for nom in colonnes}
+    if correspondance is not None:
+        if set(correspondance) - set(noms):
+            raise ValueError("La correspondance contient des noms canoniques inconnus.")
+        noms.update(correspondance)
+    manquantes = [source for source in noms.values() if source not in df.columns]
     if manquantes:
-        raise ValueError(f"Colonnes manquantes dans la base : {sorted(manquantes)}")
+        raise ValueError("Colonnes manquantes : " + ", ".join(manquantes))
+    if len(set(noms.values())) != len(noms):
+        raise ValueError("Chaque variable doit correspondre a une colonne source distincte.")
+    d = df.select(*[_col(noms[nom]).alias(nom) for nom in colonnes])
 
-    donnees = {
-        "pop":   df["Population_courbe"].astype(str).tolist(),
-        "elr":   [round(float(x), 4) for x in df["ELR"]],
-        "prime": [round(float(x), 2) for x in df["PrimeSS"]],
-        "pav":   [round(float(x), 2) for x in df["Prime_avant"]],
-        "anc":   [int(x) for x in df["Anciennete"]] if "Anciennete" in df else [0] * len(df),
-        "seg":   [int(x) for x in df["Segment_sensible"]] if "Segment_sensible" in df else [0] * len(df),
-    }
+    # ETAPE 3 : convertir les compteurs sans remplacer les inconnus par zero.
+    for nom in compteurs:
+        d = d.withColumn(nom, _nombre(nom))
+    d = d.withColumn("nb_sinistres_12m", _col("nb_resp_12m") + _col("nb_non_resp_12m"))
 
-    tranches = list(range(TRANCHE_MIN, TRANCHE_MAX, TRANCHE_PAS))
-    labels = [f"{t}–{t + TRANCHE_PAS}" for t in tranches]
+    # ETAPE 4 : distinguer un compteur ancien 12-24 mois d'un cumul 0-24 mois.
+    d = d.withColumn("nb_resp_historique_source", _col("nb_resp_12_24m"))
+    if historique_resp_cumul_24m:
+        d = d.withColumn("nb_resp_12_24m", _col("nb_resp_12_24m") - _col("nb_resp_12m"))
 
-    html_doc = (
-        _TEMPLATE
-        .replace("__DATA__", json.dumps(donnees, separators=(",", ":")))
-        .replace("__PARAMS__", json.dumps(params))
-        .replace("__BORNES__", json.dumps(BORNES_SLIDERS))
-        .replace("__LABELS__", json.dumps(labels))
-        .replace("__TR_MIN__", str(TRANCHE_MIN))
-        .replace("__TR_PAS__", str(TRANCHE_PAS))
-        .replace("__NB_TR__", str(len(tranches)))
-        .replace("__ECHEANCE__", _html.escape(str(echeance)))
-        .replace("__ANNEE__", _html.escape(str(annee)))
-        .replace("__VOLUME__", f"{len(df):,}".replace(",", " "))
-        .replace("__AJUSTEMENTS_JS__", AJUSTEMENTS_JS)
-    )
-    return html_doc
+    # ETAPE 5 : deduire le nombre ancien de sinistres non responsables.
+    d = d.withColumn("nb_non_resp_12_24m", _col("nb_total_12_24m") - _col("nb_resp_12_24m"))
 
+    # ETAPE 6 : identifier les contrats eligibles a la nouvelle majoration.
+    recent_valide = _compteur_valide(_col("nb_resp_12m")) & _compteur_valide(_col("nb_non_resp_12m"))
+    condition_eligibilite = (_col("nb_resp_12m") >= 1) | (_col("nb_non_resp_12m") >= 2)
+    d = d.withColumn("eligible", F.when(recent_valide, condition_eligibilite))
 
-def afficher_outil(df=None, params=None, echeance="01/01/2027", annee=2026, hauteur=920):
-    """Affiche l'outil directement dans une cellule Jupyter (iframe isolée)."""
-    from IPython.display import HTML
-    if df is None:
-        df = generer_base_test()
-    doc = construire_html(df, params, echeance, annee)
-    iframe = (
-        f'<iframe srcdoc="{_html.escape(doc, quote=True)}" '
-        f'style="width:100%;height:{hauteur}px;border:none;border-radius:10px;" '
-        f'sandbox="allow-scripts"></iframe>'
-    )
-    return HTML(iframe)
+    # ETAPE 7 : verifier qu'un contrat apparait une seule fois dans l'entree.
+    fenetre_contrat = Window.partitionBy("id_contrat")
+    d = d.withColumn("_sc_nb_lignes_id", F.count(F.lit(1)).over(fenetre_contrat))
 
+    erreurs_details = []
+    somme_encours = F.lit(0.0)
+    somme_responsabilite = F.lit(0.0)
+    somme_charge = F.lit(0.0)
+    nombre_resp_detail = F.lit(0.0)
+    nombre_nr_detail = F.lit(0.0)
+    nombre_partielle_estimee = F.lit(0)
 
-def sauvegarder_html(chemin, df=None, params=None, echeance="01/01/2027", annee=2026):
-    """Sauvegarde l'outil dans un fichier HTML autonome (ouvrable au navigateur)."""
-    if df is None:
-        df = generer_base_test()
-    doc = construire_html(df, params, echeance, annee)
-    with open(chemin, "w", encoding="utf-8") as f:
-        f.write(doc)
-    return chemin
+    # ETAPE 8 : appliquer la meme preparation aux quatre sinistres disponibles.
+    for j in range(1, 5):
+        actif = _col("nb_sinistres_12m") >= j
 
+        # 8a : normaliser le statut de ce sinistre.
+        statut = _texte_code(f"statut_{j}")
+        encours = F.when(statut.isin("ENCOURS", "OUVERT"), F.lit(1.0))
+        encours = encours.when(statut.isin("CLOS", "CLOTURE", "FERME"), F.lit(0.0))
+        d = d.withColumn(f"encours_{j}", F.when(actif, encours).otherwise(F.lit(0.0)))
 
-# ---------------------------------------------------------------------------
-# 6. Template HTML / CSS / JS
-# ---------------------------------------------------------------------------
+        # 8b : lire les taux numeriques, y compris les chaines '50%' ou '50,0%'.
+        brut = F.trim(_col(f"responsabilite_{j}").cast("string"))
+        brut = F.regexp_replace(brut, "%", "")
+        brut = F.regexp_replace(brut, ",", ".")
+        d = d.withColumn(f"_sc_resp_num_{j}", brut)
+        d = d.withColumn(f"_sc_resp_num_{j}", _nombre(f"_sc_resp_num_{j}"))
+        diviseur = 100.0 if unite_responsabilite == "pourcentage" else 1.0
+        contient_pct = _col(f"responsabilite_{j}").cast("string").contains("%")
+        taux = F.when(contient_pct, _col(f"_sc_resp_num_{j}") / 100.0)
+        taux = taux.otherwise(_col(f"_sc_resp_num_{j}") / diviseur)
 
-_TEMPLATE = r"""<!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Calibration ELR × Prime</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<style>
-:root{
-  --papier:#EDF0F3; --panneau:#FFFFFF; --encre:#16232E; --sourdine:#5F6E7B;
-  --trait:#DCE3E9; --accent:#0E7C86; --accent-fonce:#0A5A62;
-  --reference:#C7802B; --barre:#C6D0D9; --pastille:#F2F5F7;
-  --mono:'IBM Plex Mono','SFMono-Regular',Consolas,'Liberation Mono',monospace;
-  --sans:'IBM Plex Sans','Segoe UI',system-ui,-apple-system,sans-serif;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--papier);color:var(--encre);font-family:var(--sans);
-  font-size:13.5px;line-height:1.45;padding:14px}
-.cadre{max-width:1240px;margin:0 auto}
+        # 8c : traduire aussi les categories de responsabilite.
+        code_resp = _texte_code(f"responsabilite_{j}")
+        partielle = code_resp.isin("PARTIEL", "PARTIELLE")
+        resp = F.when(code_resp.isin("TOTAL", "TOTALE", "RESPONSABLE", "R"), F.lit(1.0))
+        resp = resp.when(code_resp.isin("NONRESPONSABLE", "NONRESP", "NR"), F.lit(0.0))
+        resp = resp.when(partielle, F.lit(float(responsabilite_partielle)))
+        resp = resp.otherwise(taux)
+        d = d.withColumn(f"responsabilite_norm_{j}", F.when(actif, resp).otherwise(F.lit(0.0)))
 
-/* ---------- bandeau ---------- */
-.bandeau{display:flex;flex-wrap:wrap;align-items:flex-end;gap:16px;
-  border-bottom:2px solid var(--encre);padding-bottom:12px;margin-bottom:14px}
-.bandeau h1{font-size:19px;font-weight:600;letter-spacing:.2px}
-.bandeau h1 span{color:var(--accent)}
-.sous-titre{color:var(--sourdine);font-size:12px;margin-top:2px}
-.faits{display:flex;gap:10px;margin-left:auto;flex-wrap:wrap}
-.fait{background:var(--panneau);border:1px solid var(--trait);border-radius:8px;
-  padding:6px 12px;min-width:96px}
-.fait .etq{font-size:10.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--sourdine)}
-.fait .val{font-family:var(--mono);font-size:14.5px;font-weight:600;margin-top:1px}
+        # 8d : remplacer la charge ouverte par le forfait, garder la charge close.
+        d = d.withColumn(f"charge_{j}", _nombre(f"charge_{j}"))
+        charge = F.when(_col(f"encours_{j}") == 1, F.lit(float(charge_en_cours)))
+        charge = charge.when(_col(f"encours_{j}") == 0, _col(f"charge_{j}"))
+        d = d.withColumn(f"charge_retenue_{j}", F.when(actif, charge).otherwise(F.lit(0.0)))
 
-/* ---------- grille ---------- */
-.grille{display:grid;grid-template-columns:322px 1fr;gap:14px}
-@media(max-width:960px){.grille{grid-template-columns:1fr}}
-.panneau{background:var(--panneau);border:1px solid var(--trait);border-radius:10px;padding:14px}
+        # 8e : une responsabilite ou un statut inconnu bloque un slot actif.
+        statut_ok = _col(f"encours_{j}").isNotNull()
+        resp_ok = _fini(_col(f"responsabilite_norm_{j}")) & _col(f"responsabilite_norm_{j}").between(0.0, 1.0)
+        charge_ok = _fini(_col(f"charge_retenue_{j}")) & (_col(f"charge_retenue_{j}") >= 0)
+        slot_ok = statut_ok & resp_ok & charge_ok
+        erreurs_details.append(F.when(actif & (~slot_ok), F.lit(f"SINISTRE_{j}_INCOMPLET_OU_INVALIDE")))
 
-/* ---------- formule (élément signature) ---------- */
-.formule{background:var(--encre);color:#EAF1F5;border-radius:10px;
-  padding:13px 14px;font-family:var(--mono);font-size:12.6px;line-height:1.9;margin-bottom:13px}
-.formule .titre-f{font-family:var(--sans);font-size:10.5px;letter-spacing:1px;
-  text-transform:uppercase;color:#8FA6B5;margin-bottom:6px}
-.formule b{font-weight:600;color:#FFD9A0}
-.co{display:inline-block;border-radius:4px;padding:0 4px;font-weight:600;
-  background:rgba(14,124,134,.35);color:#7FE0E8;transition:background .25s}
-.co.flash{background:#0E7C86;color:#fff}
-.formule .clamp{color:#B9C9D4}
+        # 8f : un statut renseigne au-dela du nombre declare signale une incoherence.
+        statut_present = _col(f"statut_{j}").isNotNull() & (F.trim(_col(f"statut_{j}").cast("string")) != "")
+        erreurs_details.append(F.when((~actif) & statut_present, F.lit(f"SINISTRE_{j}_HORS_COMPTEUR")))
 
-/* ---------- population ---------- */
-.section-titre{font-size:10.5px;text-transform:uppercase;letter-spacing:1px;
-  color:var(--sourdine);margin:2px 0 8px}
-.pops{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-bottom:13px}
-.pop{border:1px solid var(--trait);background:var(--pastille);border-radius:7px;
-  padding:7px 0;text-align:center;font-family:var(--mono);font-weight:600;font-size:14px;
-  cursor:pointer;transition:all .15s;position:relative}
-.pop:hover{border-color:var(--accent)}
-.pop.actif{background:var(--accent);border-color:var(--accent-fonce);color:#fff}
-.pop .n{display:block;font-family:var(--sans);font-weight:400;font-size:9.5px;
-  color:var(--sourdine);margin-top:1px}
-.pop.actif .n{color:#CFEDEF}
-.pop.modif::after{content:'';position:absolute;top:4px;right:5px;width:6px;height:6px;
-  border-radius:50%;background:var(--reference)}
+        # 8g : cumuler les informations, chaque sinistre actif compte une fois.
+        somme_encours = somme_encours + _col(f"encours_{j}")
+        somme_responsabilite = somme_responsabilite + _col(f"responsabilite_norm_{j}")
+        somme_charge = somme_charge + _col(f"charge_retenue_{j}")
+        nombre_resp_detail = nombre_resp_detail + F.when(actif & (_col(f"responsabilite_norm_{j}") > 0), 1.0).otherwise(0.0)
+        nombre_nr_detail = nombre_nr_detail + F.when(actif & (_col(f"responsabilite_norm_{j}") == 0), 1.0).otherwise(0.0)
+        nombre_partielle_estimee = nombre_partielle_estimee + F.when(actif & partielle, 1).otherwise(0)
 
-/* ---------- sliders ---------- */
-.curseur{display:grid;grid-template-columns:34px 1fr 76px;align-items:center;
-  gap:9px;padding:5px 0}
-.curseur label{font-family:var(--mono);font-weight:600;font-size:13.5px;color:var(--accent-fonce)}
-.curseur input[type=range]{width:100%;accent-color:var(--accent);height:22px;cursor:pointer}
-.curseur input[type=number]{width:100%;font-family:var(--mono);font-size:12px;
-  border:1px solid var(--trait);border-radius:6px;padding:4px 6px;color:var(--encre);background:#FBFCFD}
-.curseur input[type=number]:focus{outline:2px solid var(--accent);border-color:transparent}
-.separ{border-top:1px dashed var(--trait);margin:8px 0}
+    # ETAPE 9 : creer les agregats de contrat avant de normaliser les scores.
+    d = d.withColumn("nb_encours_12m", somme_encours)
+    d = d.withColumn("_sc_somme_responsabilite", somme_responsabilite)
+    d = d.withColumn("charge_retenue_12m", somme_charge)
+    d = d.withColumn("nb_resp_detail_12m", nombre_resp_detail)
+    d = d.withColumn("nb_non_resp_detail_12m", nombre_nr_detail)
+    d = d.withColumn("nb_responsabilites_partielles_estimees", nombre_partielle_estimee)
 
-.boutons{display:flex;gap:8px;margin-top:12px}
-button{font-family:var(--sans);font-size:12.5px;border-radius:7px;padding:8px 12px;
-  cursor:pointer;border:1px solid var(--trait);background:var(--pastille);color:var(--encre);
-  transition:all .15s;flex:1}
-button:hover{border-color:var(--accent);color:var(--accent-fonce)}
-button.principal{background:var(--encre);border-color:var(--encre);color:#fff}
-button.principal:hover{background:var(--accent-fonce);border-color:var(--accent-fonce);color:#fff}
+    # ETAPE 10 : verifier les compteurs, le detail et les limites de la base.
+    ancien_valide = _compteur_valide(_col("nb_total_12_24m")) & _compteur_valide(_col("nb_resp_12_24m")) & _compteur_valide(_col("nb_resp_historique_source"))
+    ancien_valide = ancien_valide & (_col("nb_non_resp_12_24m") >= 0)
+    details_concordants = (_col("nb_resp_detail_12m") == _col("nb_resp_12m")) & (_col("nb_non_resp_detail_12m") == _col("nb_non_resp_12m"))
+    id_invalide = _col("id_contrat").isNull() | (F.trim(_col("id_contrat").cast("string")) == "")
+    erreurs = [F.when(id_invalide, "ID_CONTRAT_MANQUANT")]
+    erreurs.append(F.when(_col("_sc_nb_lignes_id") > 1, "ID_CONTRAT_DUPLIQUE"))
+    erreurs.append(F.when(~recent_valide, "COMPTEURS_12M_INVALIDES"))
+    erreurs.append(F.when(_col("eligible") & (~ancien_valide), "HISTORIQUE_INCOMPLET_OU_INCOHERENT"))
+    erreurs.append(F.when(_col("eligible") & (_col("nb_sinistres_12m") > 4), "PLUS_DE_4_SINISTRES_DETAIL_INCOMPLET"))
+    erreurs.append(F.when(_col("eligible") & (_col("nb_sinistres_12m") <= 4) & (~details_concordants), "COMPTEURS_ET_RESPONSABILITES_INCOHERENTS"))
+    erreurs.append(F.when(_col("eligible") & (~_fini(_col("charge_retenue_12m"))), "CHARGE_AGREGEE_INVALIDE"))
+    erreurs += [F.when(_col("eligible"), erreur) for erreur in erreurs_details]
+    d = d.withColumn("motifs_blocage", F.concat_ws("; ", *erreurs))
 
-/* ---------- métriques ---------- */
-.metriques{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
-  gap:10px;margin-bottom:12px}
-.metrique{background:var(--panneau);border:1px solid var(--trait);border-radius:10px;
-  padding:10px 13px;border-top:3px solid var(--barre)}
-.metrique.saillante{border-top-color:var(--accent)}
-.metrique.ref{border-top-color:var(--reference)}
-.metrique .etq{font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;color:var(--sourdine)}
-.metrique .val{font-family:var(--mono);font-size:19px;font-weight:600;margin-top:3px}
-.metrique .det{font-family:var(--mono);font-size:11px;color:var(--sourdine);margin-top:2px}
-.delta-pos{color:var(--accent-fonce)} .delta-neg{color:#A54B21}
+    # ETAPE 11 : classer le contrat avant de produire une majoration.
+    d = d.withColumn("statut_calcul", F.when(_col("motifs_blocage") != "", "NON_CALCULABLE").when(~_col("eligible"), "HORS_PERIMETRE").otherwise("CALCULE"))
+    calculable = _col("statut_calcul") == "CALCULE"
+    denominateur = F.when(_col("nb_sinistres_12m") > 0, _col("nb_sinistres_12m"))
 
-/* ---------- graphique ---------- */
-.zone-graph{position:relative;height:430px}
-.legende-note{display:flex;gap:16px;align-items:center;margin-top:9px;
-  font-size:11.5px;color:var(--sourdine);flex-wrap:wrap}
-.pastille-leg{display:inline-block;width:18px;height:0;border-top:3px solid;
-  vertical-align:middle;margin-right:5px;border-radius:2px}
-.pastille-barre{display:inline-block;width:11px;height:11px;background:var(--barre);
-  border-radius:3px;margin-right:5px;vertical-align:-1px}
-@media (prefers-reduced-motion: reduce){*{transition:none !important}}
-</style>
-</head>
-<body>
-<div class="cadre">
+    # ETAPE 12 : score du statut = proportion de dossiers ouverts sur 12 mois.
+    d = d.withColumn("score_statut", F.when(calculable, _col("nb_encours_12m") / denominateur))
 
-  <div class="bandeau">
-    <div>
-      <h1>Calibration des courbes <span>ELR × Prime</span></h1>
-      <div class="sous-titre">Majoration tarifaire par population — outil de calibrage interactif</div>
-    </div>
-    <div class="faits">
-      <div class="fait"><div class="etq">Échéance</div><div class="val">__ECHEANCE__</div></div>
-      <div class="fait"><div class="etq">Année</div><div class="val">__ANNEE__</div></div>
-      <div class="fait"><div class="etq">Volume base</div><div class="val">__VOLUME__ contrats</div></div>
-    </div>
-  </div>
+    # ETAPE 13 : score de responsabilite = moyenne de tous les taux recents.
+    d = d.withColumn("score_responsabilite", F.when(calculable, _col("_sc_somme_responsabilite") / denominateur))
 
-  <div class="grille">
-    <!-- ==================== colonne de gauche ==================== -->
-    <div>
-      <div class="formule">
-        <div class="titre-f">Formule de majoration</div>
-        Valeur = (<span class="co" id="fa">a</span>·log(E) + <span class="co" id="fb">b</span>)
-        × (<span class="co" id="fl">l</span> + log(P·<span class="co" id="fm">m</span>)
-        + <span class="co" id="fn">n</span>)<br>
-        <span class="clamp">Maj. initiale = min(<span class="co" id="fmax">max</span>,
-        max(<span class="co" id="fmin">min</span>, Valeur))</span><br>
-        <span class="clamp">Maj. finale&nbsp;&nbsp; = ajustements 1→5</span>
-      </div>
+    # ETAPE 14 : score de charge = logarithme de la somme des charges retenues.
+    facteur_charge = math.log1p(charge_reference / charge_echelle)
+    score_charge = F.log1p(_col("charge_retenue_12m") / float(charge_echelle)) / facteur_charge
+    d = d.withColumn("score_charge", F.when(calculable, _borne_01(score_charge)))
 
-      <div class="panneau">
-        <div class="section-titre">Population calibrée</div>
-        <div class="pops" id="pops"></div>
+    # ETAPE 15 : score du nombre de sinistres sur les 12 derniers mois.
+    d = d.withColumn("nb_pondere_12m", _col("nb_resp_12m") + float(poids_non_responsable) * _col("nb_non_resp_12m"))
+    score_nombre = _col("nb_pondere_12m") / float(seuil_nombre_12m)
+    d = d.withColumn("score_nombre_12m", F.when(calculable, _borne_01(score_nombre)))
 
-        <div class="section-titre">Coefficients de l'équation</div>
-        <div id="sliders"></div>
+    # ETAPE 16 : score d'historique, uniquement sur la fenetre 12-24 mois.
+    d = d.withColumn("nb_pondere_12_24m", _col("nb_resp_12_24m") + float(poids_non_responsable) * _col("nb_non_resp_12_24m"))
+    score_historique = _col("nb_pondere_12_24m") / float(seuil_historique)
+    d = d.withColumn("score_historique", F.when(calculable, _borne_01(score_historique)))
 
-        <div class="boutons">
-          <button id="btn-reset-pop" class="principal">Réinitialiser la population</button>
-          <button id="btn-reset-tout">Tout réinitialiser</button>
-        </div>
-      </div>
-    </div>
+    # ETAPE 17 : afficher chaque contribution au score, sans aucun ELR.
+    d = d.withColumn("contribution_statut", float(p["statut"]) * _col("score_statut"))
+    d = d.withColumn("contribution_responsabilite", float(p["responsabilite"]) * _col("score_responsabilite"))
+    d = d.withColumn("contribution_charge", float(p["charge"]) * _col("score_charge"))
+    d = d.withColumn("contribution_nombre_12m", float(p["nombre_12m"]) * _col("score_nombre_12m"))
+    d = d.withColumn("contribution_historique", float(p["historique"]) * _col("score_historique"))
 
-    <!-- ==================== colonne principale ==================== -->
-    <div>
-      <div class="metriques">
-        <div class="metrique saillante">
-          <div class="etq">Ressource finale — population</div>
-          <div class="val" id="m-res-pop">–</div>
-          <div class="det" id="m-res-pop-delta"></div>
-        </div>
-        <div class="metrique ref">
-          <div class="etq">Référence — population</div>
-          <div class="val" id="m-res-pop-ref">–</div>
-          <div class="det">coefficients initiaux</div>
-        </div>
-        <div class="metrique saillante">
-          <div class="etq">Ressource finale — portefeuille</div>
-          <div class="val" id="m-res-glob">–</div>
-          <div class="det" id="m-res-glob-delta"></div>
-        </div>
-        <div class="metrique">
-          <div class="etq">Σ primes — population</div>
-          <div class="val" id="m-primes">–</div>
-          <div class="det" id="m-primes-det"></div>
-        </div>
-        <div class="metrique">
-          <div class="etq">Contrats — population</div>
-          <div class="val" id="m-nb">–</div>
-          <div class="det" id="m-nb-det"></div>
-        </div>
-      </div>
+    # ETAPE 18 : additionner les contributions, conserver la precision de calcul.
+    score_global = _col("contribution_statut") + _col("contribution_responsabilite") + _col("contribution_charge") + _col("contribution_nombre_12m") + _col("contribution_historique")
+    d = d.withColumn("score_global", F.when(calculable, _borne_01(score_global)))
+    d = d.withColumn("score_sur_100", F.round(100.0 * _col("score_global"), 4))
 
-      <div class="panneau">
-        <div class="zone-graph"><canvas id="graphique"></canvas></div>
-        <div class="legende-note">
-          <span><span class="pastille-barre"></span>Nombre de contrats (axe gauche)</span>
-          <span><span class="pastille-leg" style="border-color:#C7802B;border-top-style:dashed"></span>Courbe de référence — coefficients initiaux (axe droit)</span>
-          <span><span class="pastille-leg" style="border-color:#0E7C86"></span>Courbe calibrée — coefficients courants (axe droit)</span>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
+    # ETAPE 19 : appliquer la borne metier uniquement aux contrats calculables.
+    coefficient = F.lit(1.10) + F.lit(0.20) * _col("score_global")
+    coefficient = F.when(calculable, coefficient)
+    coefficient = coefficient.when(_col("statut_calcul") == "HORS_PERIMETRE", F.lit(1.0))
+    d = d.withColumn("coefficient_majoration", coefficient)
 
-<script>
-"use strict";
-/* ============================== données ============================== */
-const BRUT      = __DATA__;
-const PARAMS_INIT = __PARAMS__;
-const BORNES    = __BORNES__;
-const LABELS    = __LABELS__;
-const TR_MIN = __TR_MIN__, TR_PAS = __TR_PAS__, NB_TR = __NB_TR__;
-const POPS = Object.keys(PARAMS_INIT);
-const CLES = ["a","b","l","m","n","min","max"];
+    # ETAPE 20 : fournir aussi le taux en pourcentage pour la restitution.
+    d = d.withColumn("majoration_pct", F.round(100.0 * (_col("coefficient_majoration") - 1.0), 4))
+    d = d.withColumn("version_scoring", F.lit("SCORING_SINISTRES_V1_SANS_ELR"))
 
-/* Contrats restructurés + index par population (une seule fois) */
-const CONTRATS = BRUT.pop.map((p,i)=>({
-  popu:p, elr:BRUT.elr[i], prime:BRUT.prime[i], pav:BRUT.pav[i],
-  anc:BRUT.anc[i], seg:BRUT.seg[i],
-  logE:Math.log(BRUT.elr[i]), logP:Math.log(BRUT.prime[i]),
-  tranche:Math.min(NB_TR-1, Math.max(0, Math.floor((BRUT.prime[i]-TR_MIN)/TR_PAS)))
-}));
-const PAR_POP = {};
-POPS.forEach(p=>PAR_POP[p]=[]);
-CONTRATS.forEach(c=>{ if(PAR_POP[c.popu]) PAR_POP[c.popu].push(c); });
+    # ETAPE 21 : masquer une somme partielle des charges si le detail est incomplet.
+    d = d.withColumn("charge_retenue_12m", F.when(calculable, _col("charge_retenue_12m")))
 
-/* ====================== fonctions d'ajustement ======================= */
-__AJUSTEMENTS_JS__
-
-/* =========================== moteur de calcul ======================== */
-function majContrat(c, p, logM){
-  // Valeur = (a·log(E)+b) × (l + log(P·m) + n) ; log(P·m)=log(P)+log(m)
-  let v = (p.a*c.logE + p.b) * (p.l + c.logP + logM + p.n);
-  v = Math.min(p.max, Math.max(p.min, v));           // majoration initiale
-  for(let k=0;k<AJUSTEMENTS.length;k++) v = AJUSTEMENTS[k](v, c);
-  return v;                                           // majoration finale
-}
-
-/* Agrégats d'une population : par tranche + totaux */
-function calculerPop(popu, p){
-  const lst = PAR_POP[popu], logM = Math.log(p.m);
-  const nvT = new Float64Array(NB_TR), avT = new Float64Array(NB_TR), nbT = new Int32Array(NB_TR);
-  let nv=0, av=0;
-  for(let i=0;i<lst.length;i++){
-    const c = lst[i];
-    const np = c.pav * majContrat(c, p, logM);
-    nv += np; av += c.pav;
-    nvT[c.tranche]+=np; avT[c.tranche]+=c.pav; nbT[c.tranche]++;
-  }
-  const courbe = Array.from({length:NB_TR}, (_,t)=> avT[t]>0 ? nvT[t]/avT[t] : null);
-  return {courbe, nbT:Array.from(nbT), nv, av, ressource: av>0?nv/av:null, nb:lst.length};
-}
-
-function ressourceGlobale(tousParams){
-  let nv=0, av=0;
-  for(const popu of POPS){
-    const p = tousParams[popu], logM = Math.log(p.m), lst = PAR_POP[popu];
-    for(let i=0;i<lst.length;i++){
-      const c=lst[i]; nv += c.pav*majContrat(c,p,logM); av += c.pav;
-    }
-  }
-  return {ressource:nv/av, nv, av};
-}
-
-/* ============================ état courant =========================== */
-const copie = o => JSON.parse(JSON.stringify(o));
-let params = copie(PARAMS_INIT);
-let popActive = POPS[0];
-
-/* Références figées (coefficients initiaux) — calculées une fois */
-const REF_POP = {};
-POPS.forEach(p=>REF_POP[p]=calculerPop(p, PARAMS_INIT[p]));
-const REF_GLOB = ressourceGlobale(PARAMS_INIT);
-const NB_TOTAL = CONTRATS.length;
-
-/* =========================== mise en forme =========================== */
-const fmtNb   = new Intl.NumberFormat('fr-FR');
-const fmtEur  = new Intl.NumberFormat('fr-FR',{maximumFractionDigits:0});
-const fmtMaj  = v => v==null?'–':v.toLocaleString('fr-FR',{minimumFractionDigits:3,maximumFractionDigits:3});
-const fmtCoef = (k,v)=> k==='m' ? v.toFixed(4) : v.toFixed(3);
-
-/* ============================ graphique ============================== */
-const ctx = document.getElementById('graphique').getContext('2d');
-const graphique = new Chart(ctx, {
-  data:{
-    labels: LABELS,
-    datasets:[
-      { type:'line', label:'Courbe calibrée', data:[], yAxisID:'yMaj', order:0,
-        borderColor:'#0E7C86', backgroundColor:'#0E7C86', borderWidth:2.5,
-        pointRadius:2.5, pointHoverRadius:5, tension:.3, spanGaps:true },
-      { type:'line', label:'Courbe de référence', data:[], yAxisID:'yMaj', order:1,
-        borderColor:'#C7802B', borderDash:[7,4], borderWidth:2,
-        pointRadius:0, pointHoverRadius:4, tension:.3, spanGaps:true },
-      { type:'bar', label:'Nombre de contrats', data:[], yAxisID:'yNb', order:2,
-        backgroundColor:'#C6D0D9', borderRadius:3, barPercentage:.82 }
-    ]
-  },
-  options:{
-    responsive:true, maintainAspectRatio:false, animation:{duration:220},
-    interaction:{mode:'index', intersect:false},
-    plugins:{
-      legend:{display:false},
-      tooltip:{
-        backgroundColor:'#16232E', titleFont:{family:"'IBM Plex Mono',monospace"},
-        bodyFont:{family:"'IBM Plex Mono',monospace", size:12}, padding:10,
-        callbacks:{
-          title: it => 'Tranche de prime ' + it[0].label + ' €',
-          label: it => it.dataset.yAxisID==='yMaj'
-              ? ' ' + it.dataset.label + ' : ' + fmtMaj(it.parsed.y)
-              : ' Contrats : ' + fmtNb.format(it.parsed.y)
-        }
-      }
-    },
-    scales:{
-      x:{ title:{display:true, text:'Tranche de prime (PrimeSS, €)',
-            font:{size:11.5}, color:'#5F6E7B'},
-          grid:{display:false},
-          ticks:{font:{family:"'IBM Plex Mono',monospace", size:10},
-            maxRotation:60, minRotation:60, color:'#5F6E7B'} },
-      yNb:{ position:'left', beginAtZero:true,
-          title:{display:true, text:'Nombre de contrats', font:{size:11.5}, color:'#5F6E7B'},
-          grid:{color:'#EAEEF2'},
-          ticks:{font:{family:"'IBM Plex Mono',monospace", size:10.5}, color:'#5F6E7B'} },
-      yMaj:{ position:'right',
-          title:{display:true, text:'Majoration moyenne (Σ nouvelles / Σ anciennes)',
-            font:{size:11.5}, color:'#0A5A62'},
-          grid:{drawOnChartArea:false},
-          ticks:{font:{family:"'IBM Plex Mono',monospace", size:10.5}, color:'#0A5A62',
-            callback:v=>fmtMaj(v)} }
-    }
-  }
-});
-
-/* ======================= construction interface ====================== */
-const elPops = document.getElementById('pops');
-POPS.forEach(p=>{
-  const d = document.createElement('div');
-  d.className='pop'; d.id='pop-'+p;
-  d.innerHTML = p + '<span class="n">'+fmtNb.format(PAR_POP[p].length)+'</span>';
-  d.title = 'Population '+p+' — '+fmtNb.format(PAR_POP[p].length)+' contrats';
-  d.addEventListener('click', ()=>changerPopulation(p));
-  elPops.appendChild(d);
-});
-
-const elSliders = document.getElementById('sliders');
-const refs = {};   // refs[k] = {range, num, badge}
-CLES.forEach((k,idx)=>{
-  if(k==='min'){ const s=document.createElement('div'); s.className='separ'; elSliders.appendChild(s); }
-  const [mn,mx,pas] = BORNES[k];
-  const ligne = document.createElement('div');
-  ligne.className='curseur';
-  ligne.innerHTML =
-    '<label for="sl-'+k+'">'+k+'</label>'+
-    '<input type="range" id="sl-'+k+'" min="'+mn+'" max="'+mx+'" step="'+pas+'" aria-label="Coefficient '+k+'">'+
-    '<input type="number" id="nu-'+k+'" min="'+mn+'" max="'+mx+'" step="'+pas+'" aria-label="Valeur du coefficient '+k+'">';
-  elSliders.appendChild(ligne);
-  const range = ligne.querySelector('input[type=range]');
-  const num   = ligne.querySelector('input[type=number]');
-  refs[k] = {range, num, badge:document.getElementById('f'+k)};
-  range.addEventListener('input', ()=>appliquerCoef(k, parseFloat(range.value)));
-  num.addEventListener('change', ()=>{
-    let v = parseFloat(num.value);
-    if(isNaN(v)) v = params[popActive][k];
-    v = Math.min(mx, Math.max(mn, v));
-    appliquerCoef(k, v);
-  });
-});
-
-document.getElementById('btn-reset-pop').addEventListener('click', ()=>{
-  params[popActive] = copie(PARAMS_INIT[popActive]);
-  synchroniserControles(); planifier();
-});
-document.getElementById('btn-reset-tout').addEventListener('click', ()=>{
-  params = copie(PARAMS_INIT);   // la population sélectionnée est conservée
-  synchroniserControles(); planifier();
-});
-
-/* ========================= logique interactive ======================= */
-function appliquerCoef(k, v){
-  params[popActive][k] = v;
-  refs[k].range.value = v; refs[k].num.value = fmtCoef(k, v);
-  refs[k].badge.textContent = k+'='+fmtCoef(k,v);
-  refs[k].badge.classList.add('flash');
-  clearTimeout(refs[k]._t);
-  refs[k]._t = setTimeout(()=>refs[k].badge.classList.remove('flash'), 260);
-  planifier();
-}
-
-function synchroniserControles(){
-  const p = params[popActive];
-  CLES.forEach(k=>{
-    refs[k].range.value = p[k];
-    refs[k].num.value = fmtCoef(k, p[k]);
-    refs[k].badge.textContent = k+'='+fmtCoef(k, p[k]);
-  });
-  POPS.forEach(q=>{
-    const el = document.getElementById('pop-'+q);
-    el.classList.toggle('actif', q===popActive);
-    el.classList.toggle('modif', JSON.stringify(params[q])!==JSON.stringify(PARAMS_INIT[q]));
-  });
-}
-
-function changerPopulation(p){
-  popActive = p;
-  synchroniserControles();
-  planifier(true);
-}
-
-/* recalcul planifié sur requestAnimationFrame → fluide pendant le drag */
-let enAttente = false, avecStructure = false;
-function planifier(structure){
-  avecStructure = avecStructure || !!structure;
-  if(enAttente) return;
-  enAttente = true;
-  requestAnimationFrame(()=>{ enAttente=false; const s=avecStructure; avecStructure=false; rafraichir(s); });
-}
-
-function rafraichir(structure){
-  const res  = calculerPop(popActive, params[popActive]);
-  const ref  = REF_POP[popActive];
-  const glob = ressourceGlobale(params);
-
-  /* graphique */
-  graphique.data.datasets[0].data = res.courbe;
-  if(structure){
-    graphique.data.datasets[1].data = ref.courbe;
-    graphique.data.datasets[2].data = ref.nbT;
-  }
-  graphique.update(structure ? undefined : 'none');
-
-  /* métriques */
-  const dPop  = res.ressource - ref.ressource;
-  const dGlob = glob.ressource - REF_GLOB.ressource;
-  poser('m-res-pop',  fmtMaj(res.ressource));
-  poserDelta('m-res-pop-delta', dPop);
-  poser('m-res-pop-ref', fmtMaj(ref.ressource));
-  poser('m-res-glob', fmtMaj(glob.ressource));
-  poserDelta('m-res-glob-delta', dGlob);
-  poser('m-primes', fmtEur.format(res.nv)+' €');
-  poser('m-primes-det', 'avant : '+fmtEur.format(res.av)+' €');
-  poser('m-nb', fmtNb.format(res.nb));
-  poser('m-nb-det', 'portefeuille : '+fmtNb.format(NB_TOTAL));
-  synchroniserControles();
-}
-
-function poser(id, txt){ document.getElementById(id).textContent = txt; }
-function poserDelta(id, d){
-  const el = document.getElementById(id);
-  const signe = d>=0?'+':'−';
-  const pts = Math.abs(d).toLocaleString('fr-FR',{minimumFractionDigits:3,maximumFractionDigits:3});
-  const pct = (Math.abs(d)*100).toLocaleString('fr-FR',{minimumFractionDigits:2,maximumFractionDigits:2});
-  el.textContent = signe+pts+' ('+signe+pct+' %) vs référence';
-  el.className = 'det '+(d>=0?'delta-pos':'delta-neg');
-}
-
-/* ============================ démarrage ============================== */
-synchroniserControles();
-planifier(true);
-</script>
-</body>
-</html>
-"""
+    # ETAPE 22 : retirer les colonnes techniques, garder les autres pour audit.
+    techniques = [nom for nom in d.columns if nom.startswith("_sc_")]
+    return d.drop(*techniques)
 
 
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    df = generer_base_test(8000)
-    df.to_csv("base_test_contrats.csv", index=False)
-    resultats, ressource = calculer_resultats(df, PARAMS_INITIAUX)
-    print(f"Base test : {len(df)} contrats")
-    print(f"Ressource finale (référence Python) : {ressource:.6f}")
-    print(sauvegarder_html("outil_calibration.html", df))
+# UTILISATION dans votre notebook, apres avoir cree votre DataFrame df :
+#
+# df_score = calculer_scoring(
+#     df,
+#     charge_en_cours=3000.0,              # Exemple de forfait PAR dossier ouvert.
+#     unite_responsabilite="pourcentage", # 50 signifie 50%, 100 signifie 100%.
+# )
+#
+# df_score.select(
+#     "id_contrat",
+#     "eligible",
+#     "statut_calcul",
+#     "score_statut",
+#     "score_responsabilite",
+#     "score_charge",
+#     "score_nombre_12m",
+#     "score_historique",
+#     "score_sur_100",
+#     "coefficient_majoration",
+#     "majoration_pct",
+#     "motifs_blocage",
+# ).show(truncate=False)
+#
+# # Si vos noms reels sont differents, donnez une correspondance explicite :
+# correspondance = {
+#     "id_contrat": "ID contrat",
+#     "nb_resp_12m": "votre_colonne_responsables_12m",
+#     "nb_non_resp_12m": "votre_colonne_non_responsables_12m",
+#     "nb_total_12_24m": "votre_colonne_total_12_24m",
+#     "nb_resp_12_24m": "votre_colonne_responsables_12_24m",
+#     "statut_1": "votre_colonne_statut_sinistre_1",
+#     "responsabilite_1": "votre_colonne_responsabilite_sinistre_1",
+#     "charge_1": "votre_colonne_charge_sinistre_1",
+#     # Completer de meme pour les slots 2, 3 et 4.
+# }
+#
+# df_score = calculer_scoring(df, charge_en_cours=3000.0, correspondance=correspondance)
