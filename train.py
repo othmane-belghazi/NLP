@@ -1,100 +1,214 @@
-"""Matrice depuis un seul DataFrame : % de contrats et charge en couleur.
-Installation : pip install pandas matplotlib
-Utilisation : pourcentages, charges = generer_matrice(df)
-id doit identifier le contrat. La charge de chaque sinistre doit figurer
-une seule fois ; les charges répétées après une jointure seraient additionnées.
-"""
+from IPython.display import HTML, display
 from html import escape
-from pathlib import Path
+from math import sqrt
 
-import numpy as np
-import pandas as pd
-from matplotlib import colormaps
-from matplotlib.colors import to_hex
+# ── Données à remplacer par les vôtres ──────────────────────────────
+segments = [
+    dict(
+        nom="Responsable + paiement",
+        elr=112, resiliation=18,
+        ressource_2026=0.90, ressource_2025=1.20,
+        part_contrats=12, etiquette="dessus"
+    ),
+    dict(
+        nom="NR répétés + paiement",
+        elr=88, resiliation=15,
+        ressource_2026=0.72, ressource_2025=0.80,
+        part_contrats=8, etiquette="droite"
+    ),
+    dict(
+        nom="Responsable seul",
+        elr=103, resiliation=9,
+        ressource_2026=3.90, ressource_2025=3.50,
+        part_contrats=34, etiquette="dessous"
+    ),
+    dict(
+        nom="NR répétés seuls",
+        elr=78, resiliation=7,
+        ressource_2026=3.00, ressource_2025=2.70,
+        part_contrats=28, etiquette="dessous"
+    ),
+    dict(
+        nom="Paiement seul",
+        elr=66, resiliation=20,
+        ressource_2026=1.20, ressource_2025=1.60,
+        part_contrats=18, etiquette="droite"
+    ),
+]
 
+# ── Style et dimensions du visuel ──────────────────────────────────
+LARGEUR, HAUTEUR = 1600, 1020
 
-def generer_matrice(df, sortie="matrice.html", colonnes=None):
-    # Modifier ici les noms de colonnes si nécessaire.
-    noms = {
-        "id": "id", "etat": "etat", "nature": "nature",
-        "responsabilite": "responsabilité",
-        "type": "type sinistre", "charge": "charge",
-    }
-    if colonnes:
-        noms.update(colonnes)
-    if len(set(noms.values())) != len(noms):
-        raise ValueError("Chaque variable doit correspondre à une colonne distincte.")
-    manquantes = set(noms.values()) - set(df.columns)
-    if manquantes:
-        raise ValueError(f"Colonnes absentes : {sorted(manquantes)}")
-    s = df[list(noms.values())].copy()
-    s.columns = list(noms)
-    if s["id"].isna().any():
-        raise ValueError("Chaque ligne doit avoir un identifiant de contrat.")
-    total = s["id"].nunique()
-    if total == 0:
-        raise ValueError("Le DataFrame ne contient aucun contrat.")
+MARINE = "#062D47"
+BLEU   = "#006C9C"
+BAISSE = "#B76557"
+GRIS   = "#61727D"
+GRILLE = "#DFE6EA"
 
-    dimensions = ["nature", "type", "etat", "responsabilite"]
-    # Les contrats sans sinistre restent dans le dénominateur si présents dans df.
-    s = s.loc[~s[dimensions + ["charge"]].isna().all(axis=1)].copy()
-    if s.empty:
-        raise ValueError("Aucun sinistre à représenter.")
-    for col in dimensions:
-        s[col] = s[col].astype("string").fillna("Non renseigné")
-    s["charge"] = pd.to_numeric(s["charge"], errors="raise")
-    if not np.isfinite(s["charge"]).all():
-        raise ValueError("Chaque sinistre doit avoir une charge numérique renseignée.")
+# Bornes conservées pour reproduire exactement la disposition.
+ELR_MIN, ELR_MAX = 54.5, 123.5
+RESILIATION_MAX = 25
 
-    groupes = s.groupby(dimensions, observed=True).agg(
-        contrats=("id", "nunique"), charge=("charge", "sum"))
-    pourcentages = (100 * groupes["contrats"] / total).unstack(
-        ["etat", "responsabilite"]).fillna(0).sort_index(axis=1)
-    charges = groupes["charge"].unstack(["etat", "responsabilite"]).reindex(
-        index=pourcentages.index, columns=pourcentages.columns).fillna(0)
+def format_nombre(valeur):
+    return f"{valeur:.2f}".replace(".", ",")
 
-    # Une échelle commune de charge pour toutes les cases.
-    bas = min(0.0, float(charges.min().min()))
-    haut = max(0.0, float(charges.max().max()))
-    palette = colormaps["Blues"]
-    euros = lambda x: f"{x:,.2f} €".replace(",", " ").replace(".", ",")
+def format_ecart(segment):
+    ecart = segment["ressource_2026"] - segment["ressource_2025"]
+    signe = "+" if ecart >= 0 else "−"
+    return signe + format_nombre(abs(ecart))
 
-    entetes = '<tr><th rowspan="2">Nature</th><th rowspan="2">Type</th>'
-    for etat in pourcentages.columns.get_level_values(0).unique():
-        nombre = sum(col[0] == etat for col in pourcentages.columns)
-        entetes += f'<th colspan="{nombre}">État : {escape(str(etat))}</th>'
-    entetes += '</tr><tr>' + ''.join(
-        f'<th>Responsabilité : {escape(str(resp))}</th>'
-        for _, resp in pourcentages.columns) + '</tr>'
+def position_x(elr):
+    return 190 + (elr - ELR_MIN) / (ELR_MAX - ELR_MIN) * 1310
 
-    lignes = []
-    for (nature, typ), valeurs in pourcentages.iterrows():
-        ligne = f'<tr><th>{escape(str(nature))}</th><th>{escape(str(typ))}</th>'
-        for col, pct in valeurs.items():
-            charge = charges.loc[(nature, typ), col]
-            niveau = (charge - bas) / (haut - bas) if haut > bas else 0
-            couleur = to_hex(palette(0.08 + 0.52 * niveau))
-            texte = f'{pct:.1f} %'.replace('.', ',')
-            detail = f'Charge totale : {euros(charge)}'
-            ligne += (f'<td style="background:{couleur}" title="{detail}" '
-                      f'aria-label="{texte}. {detail}">{texte}</td>')
-        lignes.append(ligne + '</tr>')
-    tableau = '<table><thead>' + entetes + '</thead><tbody>' + ''.join(lignes) + '</tbody></table>'
+def position_y(taux):
+    return 820 - taux / RESILIATION_MAX * 580
 
-    page = f"""<!doctype html>
-<html lang="fr"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Matrice des sinistres</title>
-<style>body{{font-family:Arial,sans-serif;margin:24px;color:#111;background:#fff}}
-table{{border-collapse:collapse}} th,td{{padding:12px;border:1px solid #ddd;text-align:center}}
-th{{background:#f3f4f6}} .matrice{{overflow-x:auto}}</style>
-<h2>Matrice des sinistres</h2>
-<p>Chaque case : % des {total} contrats distincts présents dans df.</p>
-<div class="matrice">{tableau}</div>
-<p>Bleu clair → bleu foncé : charge totale de {euros(bas)} à {euros(haut)}.
-Survol d’une case : charge exacte.</p>
-<p>Un contrat peut apparaître dans plusieurs cases : les pourcentages
-ne s’additionnent donc pas nécessairement à 100 %.</p>
-</html>"""
-    Path(sortie).write_text(page, encoding="utf-8")
-    return pourcentages, charges
+def texte(contenu, x, y, taille=24, couleur=MARINE,
+          ancrage="start", police="Arial", graisse=400):
+    return (
+        f'<text x="{x}" y="{y}" fill="{couleur}" '
+        f'font-family="{police}" font-size="{taille}" '
+        f'font-weight="{graisse}" text-anchor="{ancrage}">'
+        f'{escape(str(contenu))}</text>'
+    )
+
+def ligne(x1, y1, x2, y2, couleur=GRILLE, epaisseur=1):
+    return (
+        f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" '
+        f'stroke="{couleur}" stroke-width="{epaisseur}"/>'
+    )
+
+def cercle(cx, cy, rayon, couleur):
+    return (
+        f'<circle cx="{cx}" cy="{cy}" '
+        f'r="{rayon}" fill="{couleur}"/>'
+    )
+
+# ── Construction du graphique ──────────────────────────────────────
+svg = [
+    f'<svg xmlns="http://www.w3.org/2000/svg" '
+    f'viewBox="0 0 {LARGEUR} {HAUTEUR}" '
+    f'width="100%" role="img" '
+    f'aria-label="ELR, résiliation et évolution de la ressource HT" '
+    f'style="display:block; height:auto;">',
+    f'<rect width="{LARGEUR}" height="{HAUTEUR}" fill="white"/>'
+]
+
+# Titre
+svg += [
+    texte(
+        "Performance des segments et évolution de la ressource HT",
+        70, 76, taille=43, police="Georgia"
+    ),
+    texte("2026 vs 2025 · Exemple illustratif", 73, 120, 23, GRIS),
+    ligne(70, 150, 1530, 150, MARINE, 2),
+]
+
+# Légende
+svg += [
+    cercle(81, 187, 8, BLEU),
+    texte("Hausse de ressource", 101, 195, 22, GRIS),
+    cercle(401, 187, 8, BAISSE),
+    texte("Baisse de ressource", 421, 195, 22, GRIS),
+    texte(
+        "Surface des bulles = part des contrats",
+        1530, 195, 22, GRIS, "end"
+    ),
+]
+
+# Grille et graduations de l'axe vertical
+for valeur in [0, 5, 10, 15, 20, 25]:
+    y = position_y(valeur)
+    svg += [
+        ligne(190, y, 1500, y),
+        texte(valeur, 163, y + 8, 23, GRIS, "end"),
+    ]
+
+# Graduations de l'axe horizontal
+for valeur in [60, 70, 80, 90, 100, 110, 120]:
+    x = position_x(valeur)
+    svg += [
+        ligne(x, 820, x, 827, MARINE),
+        texte(valeur, x, 856, 23, GRIS, "middle"),
+    ]
+
+# Titres des axes
+svg += [
+    ligne(190, 820, 1500, 820, MARINE, 1.4),
+    texte("ELR (%)", 845, 901, 25, MARINE, "middle"),
+    '<g transform="rotate(-90 85 535)">',
+    texte("Taux de résiliation (%)", 85, 535, 25, MARINE, "middle"),
+    "</g>",
+]
+
+# Bulles et étiquettes
+for segment in segments:
+    cx = position_x(segment["elr"])
+    cy = position_y(segment["resiliation"])
+
+    # La surface, et non le rayon, est proportionnelle à la part.
+    rayon = 64 * sqrt(segment["part_contrats"] / 34)
+
+    ecart = segment["ressource_2026"] - segment["ressource_2025"]
+    couleur = BLEU if ecart >= 0 else BAISSE
+
+    svg += [
+        cercle(cx, cy, rayon, couleur),
+        texte(
+            f'{segment["part_contrats"]} %',
+            cx, cy + 9, 26, "white", "middle"
+        ),
+    ]
+
+    # Placement des étiquettes
+    label_x = cx
+    label_y = cy + rayon + 37
+    ancrage = "middle"
+
+    if segment["etiquette"] == "dessus":
+        label_y = cy - rayon - 57
+
+    elif segment["etiquette"] == "droite":
+        label_x = cx + rayon + 23
+        label_y = cy - 10
+        ancrage = "start"
+
+    montant = format_nombre(segment["ressource_2026"])
+    variation = format_ecart(segment)
+
+    svg += [
+        texte(
+            segment["nom"], label_x, label_y,
+            25, MARINE, ancrage, graisse=500
+        ),
+        texte(
+            f"{montant} M€ / {variation} M€",
+            label_x, label_y + 33, 24, GRIS, ancrage
+        ),
+    ]
+
+# Notes de lecture
+svg += [
+    ligne(70, 934, 1530, 934),
+    texte(
+        "Étiquettes : ressource HT 2026 en M€ / "
+        "écart absolu avec 2025 en M€",
+        72, 966, 21, GRIS
+    ),
+    texte(
+        "Données fictives. Parts des contrats sur la population analysée. "
+        "NR répétés = plus de 2 sinistres non responsables.",
+        72, 998, 19, GRIS
+    ),
+    "</svg>",
+]
+
+# ── Affichage HTML dans le notebook ────────────────────────────────
+html_graphique = (
+    '<div style="width:100%; max-width:1600px; '
+    'margin:0 auto; background:white;">'
+    + "".join(svg)
+    + "</div>"
+)
+
+display(HTML(html_graphique))
